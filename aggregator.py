@@ -43,6 +43,31 @@ from common import (
 
 log = logging.getLogger("aggregator")
 
+
+class _JobSpyNoiseFilter(logging.Filter):
+    """Drop expected JobSpy board failures so scrapes stay clean."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        name = str(getattr(record, "name", "") or "")
+        if not name.startswith("JobSpy"):
+            return True
+        try:
+            msg = record.getMessage().lower()
+        except Exception:
+            msg = str(record.msg or "").lower()
+        noisy = (
+            "location not parsed" in msg
+            or "status code 400" in msg
+            or "status code 403" in msg
+            or "forbidden aa" in msg
+        )
+        return not noisy
+
+
+logging.getLogger().addFilter(_JobSpyNoiseFilter())
+if logging.lastResort is not None:
+    logging.lastResort.addFilter(_JobSpyNoiseFilter())
+
 REQUEST_TIMEOUT = 20
 USER_AGENT = (
     "Mozilla/5.0 (compatible; automated-job-monitor/1.0; "
@@ -51,7 +76,8 @@ USER_AGENT = (
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json"})
 
-JOBSPY_SITES = ["indeed", "linkedin", "zip_recruiter", "glassdoor", "google"]
+# Glassdoor 400s on "United States"; ZipRecruiter is Cloudflare-403. Skip both.
+JOBSPY_SITES = ["indeed", "linkedin", "google"]
 
 SIMPLIFY_LISTING_URLS = (
     "https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json",
@@ -688,6 +714,9 @@ def scrape_jobspy(search_terms: list[str], hours_old: int, results_wanted: int) 
     except Exception as exc:
         log.warning("python-jobspy is unavailable (%s) — skipping board scrape.", exc)
         return []
+
+    for name in ("JobSpy", "JobSpy:Glassdoor", "JobSpy:ZipRecruiter"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)
 
     jobs: list[JobPosting] = []
     for term in search_terms:

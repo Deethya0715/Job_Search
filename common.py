@@ -283,6 +283,10 @@ def service_account_path() -> Path:
     return path
 
 
+def sheets_configured() -> bool:
+    return service_account_path().is_file()
+
+
 def load_matches() -> dict[str, Any]:
     payload = load_json(MATCHES_PATH, {"jobs": [], "generated_at": "", "new_count": 0})
     payload.setdefault("jobs", [])

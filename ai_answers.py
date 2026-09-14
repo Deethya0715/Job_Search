@@ -140,31 +140,123 @@ def _parse_json_object(text: str) -> dict[str, Any]:
             return {}
 
 
+_GEMINI_WORKING_MODEL = ""
+_GEMINI_LISTED: list[str] | None = None
+_GEMINI_FALLBACKS = (
+    "gemini-flash-latest",
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+)
+
+
+def _redact_secret(text: str, secret: str) -> str:
+    cleaned = text or ""
+    if secret:
+        cleaned = cleaned.replace(secret, "REDACTED")
+    return re.sub(r"(key=)[^&\s]+", r"\1REDACTED", cleaned, flags=re.I)
+
+
+def _list_gemini_models(key: str) -> list[str]:
+    global _GEMINI_LISTED
+    if _GEMINI_LISTED is not None:
+        return _GEMINI_LISTED
+    names: list[str] = []
+    try:
+        response = requests.get(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            headers={"x-goog-api-key": key},
+            params={"pageSize": 80},
+            timeout=15,
+        )
+        response.raise_for_status()
+        for item in response.json().get("models") or []:
+            methods = item.get("supportedGenerationMethods") or []
+            if "generateContent" not in methods:
+                continue
+            name = str(item.get("name") or "").replace("models/", "").strip()
+            lowered = name.lower()
+            if not name or "tts" in lowered or "image" in lowered or "lyria" in lowered:
+                continue
+            names.append(name)
+    except Exception:
+        names = []
+    _GEMINI_LISTED = names
+    return names
+
+
+def _gemini_model_candidates(key: str) -> list[str]:
+    preferred = (env("GEMINI_MODEL", "gemini-flash-latest") or "").strip()
+    models: list[str] = []
+    if _GEMINI_WORKING_MODEL:
+        models.append(_GEMINI_WORKING_MODEL)
+    if preferred:
+        models.append(preferred)
+    models.extend(_GEMINI_FALLBACKS)
+    models.extend(_list_gemini_models(key)[:8])
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for model in models:
+        if model and model not in seen:
+            seen.add(model)
+            ordered.append(model)
+    return ordered
+
+
 def _gemini_complete(system: str, user: str) -> str:
+    global _GEMINI_WORKING_MODEL
     key = env("GEMINI_API_KEY")
     if not key:
         return ""
-    model = env("GEMINI_MODEL", "gemini-2.0-flash")
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent?key={key}"
-    )
-    response = requests.post(
-        url,
-        headers={"Content-Type": "application/json"},
-        json={
-            "system_instruction": {"parts": [{"text": system}]},
-            "contents": [{"parts": [{"text": user}]}],
-            "generationConfig": {
-                "temperature": 0.35,
-                "responseMimeType": "application/json",
-            },
+    payload = {
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": [{"parts": [{"text": user}]}],
+        "generationConfig": {
+            "temperature": 0.35,
+            "responseMimeType": "application/json",
         },
-        timeout=_TIMEOUT,
-    )
-    response.raise_for_status()
-    parts = (((response.json().get("candidates") or [{}])[0].get("content") or {}).get("parts") or [])
-    return "".join(str(part.get("text") or "") for part in parts)
+    }
+    last_error = ""
+    for model in _gemini_model_candidates(key):
+        try:
+            response = requests.post(
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{model}:generateContent",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": key,
+                },
+                json=payload,
+                timeout=_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            last_error = _redact_secret(str(exc), key)
+            continue
+        if response.status_code in {404, 410}:
+            last_error = f"{response.status_code} for {model}"
+            continue
+        if response.status_code >= 400:
+            last_error = _redact_secret(
+                f"{response.status_code} for {model}: {response.text[:180]}",
+                key,
+            )
+            continue
+        parts = (
+            ((response.json().get("candidates") or [{}])[0].get("content") or {}).get(
+                "parts"
+            )
+            or []
+        )
+        text = "".join(str(part.get("text") or "") for part in parts)
+        if not text.strip():
+            last_error = f"{model} returned empty text"
+            continue
+        if _GEMINI_WORKING_MODEL != model:
+            _GEMINI_WORKING_MODEL = model
+            print(f"  using Gemini model {model}")
+        return text
+    raise RuntimeError(last_error or "No Gemini model accepted this API key.")
 
 
 def _complete(system: str, user: str) -> str:
@@ -249,7 +341,7 @@ def answer_questions(
     try:
         parsed = _parse_json_object(_complete(system, user))
     except Exception as exc:
-        print(f"[warn] AI answers failed: {exc}")
+        print(f"[warn] AI answers failed: {_redact_secret(str(exc), env('GEMINI_API_KEY'))}")
         return result
 
     rows = parsed.get("answers")
@@ -443,7 +535,7 @@ def generate_cover_letter(
             parsed = _parse_json_object(_complete(system, user))
             letter = str(parsed.get("cover_letter") or "").strip()
         except Exception as exc:
-            print(f"[warn] AI cover letter failed: {exc}")
+            print(f"[warn] AI cover letter failed: {_redact_secret(str(exc), env('GEMINI_API_KEY'))}")
             letter = ""
 
     if not letter:

@@ -201,11 +201,27 @@ CAPTCHA_TEXT_HINTS = (
 AI_SKIP_FIELD_BITS = (
     "password",
     "captcha",
-    "resume",
+    "_systemfield_resume",
     "curriculum vitae",
     "dropbox",
     "choose file",
+    "attach a file",
 )
+EMPTY_WIDGET_VALUES = {
+    "",
+    "select",
+    "select...",
+    "please select",
+    "choose",
+    "choose an option",
+    "select an option",
+    "-",
+    "pick date",
+    "pick date...",
+    "select date",
+    "mm/dd/yyyy",
+    "yyyy-mm-dd",
+}
 
 # Human-readable field aliases used for label / name / placeholder matching.
 FIELD_ALIASES: dict[str, tuple[str, ...]] = {
@@ -813,6 +829,79 @@ def visible_invalid_fields(page: Page) -> list[str]:
     return labels
 
 
+def _any_resume_uploaded(page: Page) -> bool:
+    for root in application_roots(page):
+        files = root.locator("input[type='file']")
+        try:
+            total = min(files.count(), 20)
+        except Exception:
+            total = 0
+        for index in range(total):
+            try:
+                if files.nth(index).evaluate("el => !!(el.files && el.files.length)"):
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def leftover_required_fields(page: Page) -> list[str]:
+    """Invalid or still-empty required widgets the bot did not finish."""
+    labels: list[str] = []
+    seen: set[str] = set()
+    resume_uploaded = _any_resume_uploaded(page)
+    for blob in visible_invalid_fields(page):
+        lowered = " ".join(blob.lower().split())
+        if not lowered or lowered in seen:
+            continue
+        if any(bit in lowered for bit in ("password", "captcha")):
+            continue
+        if resume_uploaded and (
+            "_systemfield_resume" in lowered
+            or "choose file" in lowered
+            or lowered.startswith("resume ")
+        ):
+            continue
+        if lowered.startswith("pick date") or lowered in {"select date", "mm/dd/yyyy"}:
+            continue
+        seen.add(lowered)
+        labels.append(blob)
+    for root in application_roots(page):
+        controls = root.locator(
+            "textarea, input[type='text'], input[type='number'], input[type='date'], "
+            "select, [contenteditable='true'], [role='combobox']"
+        )
+        try:
+            total = min(controls.count(), 80)
+        except Exception:
+            total = 0
+        for index in range(total):
+            control = controls.nth(index)
+            try:
+                if not control.is_visible():
+                    continue
+                required = bool(control.get_attribute("required")) or bool(
+                    control.get_attribute("aria-required")
+                )
+            except Exception:
+                continue
+            if not required or not _is_empty_value(_current_value(control)):
+                continue
+            blob = " ".join(
+                (associated_label_text(root, control) + " " + attr_blob(control)).split()
+            )[:120]
+            lowered = blob.lower()
+            if not lowered or lowered in seen:
+                continue
+            if any(bit in lowered for bit in ("password", "captcha", "choose file")):
+                continue
+            if lowered.startswith("pick date") or lowered in {"select date", "mm/dd/yyyy"}:
+                continue
+            seen.add(lowered)
+            labels.append(blob or f"required-field-{index}")
+    return labels
+
+
 def _click_locator(candidate: Locator) -> bool:
     try:
         candidate.scroll_into_view_if_needed(timeout=2_000)
@@ -1017,7 +1106,7 @@ def submit_filled_application(
     profile: dict[str, Any] | None = None,
     job: JobPosting | None = None,
 ) -> str:
-    """Click Continue/Next, then Submit. Returns submitted | captcha | failed."""
+    """Click Continue/Next, then Submit. Returns submitted | captcha | needs_review | failed."""
     for step in range(8):
         dismiss_cookie_banners(page)
         if captcha_present(page):
@@ -1027,7 +1116,18 @@ def submit_filled_application(
         check_consent_boxes(page)
         answer_hear_about(page)
         if profile is not None:
+            resume_path = str(profile.get("_resume_abs") or "")
+            for root in application_roots(page):
+                fill_date_pickers(root, profile)
+                if resume_path:
+                    upload_resume(root, resume_path)
             fill_remaining_with_ai(page, profile, job)
+
+        leftover = leftover_required_fields(page)
+        if leftover and profile is not None:
+            fill_application(page, profile, job)
+            fill_remaining_with_ai(page, profile, job)
+            leftover = leftover_required_fields(page)
 
         if click_continue_control(page):
             print(f"  clicked Continue/Next (step {step + 1}).")
@@ -1042,6 +1142,12 @@ def submit_filled_application(
                 fill_application(page, profile, job)
                 fill_remaining_with_ai(page, profile, job)
             continue
+
+        leftover = leftover_required_fields(page)
+        if leftover:
+            preview = "; ".join(leftover[:6])
+            print(f"[*] Required fields still blank — not clicking Submit: {preview}")
+            return "needs_review"
 
         if captcha_present(page):
             return "captcha"
@@ -1058,15 +1164,17 @@ def submit_filled_application(
         if submission_looks_successful(page):
             print("[*] Submission confirmed on the page.")
             return "submitted"
-        invalid = visible_invalid_fields(page)
+        invalid = leftover_required_fields(page)
         if invalid:
             preview = "; ".join(invalid[:6])
             print(f"[warn] Submit clicked but required fields are still invalid: {preview}")
             if profile is not None:
                 fill_remaining_with_ai(page, profile, job)
-            if step < 3:
-                continue
-            return "failed"
+            still = leftover_required_fields(page)
+            if still:
+                print("[*] Stopping auto-submit so you can finish the remaining questions.")
+                return "needs_review"
+            continue
         print("[*] Submit clicked; no confirmation text — treating as submitted.")
         return "submitted"
     print("[warn] Ran out of Continue/Submit steps without confirmation.")
@@ -1108,9 +1216,32 @@ def first_visible(locator: Locator) -> Locator | None:
     return None
 
 
+def _is_empty_value(value: str) -> bool:
+    text = " ".join((value or "").split()).strip().lower().rstrip(".")
+    if text in EMPTY_WIDGET_VALUES:
+        return True
+    return text.startswith("pick date") or text.startswith("select...")
+
+
 def _current_value(locator: Locator) -> str:
     try:
-        return (locator.input_value(timeout=1_000) or "").strip()
+        value = (locator.input_value(timeout=800) or "").strip()
+        if value:
+            return value
+    except Exception:
+        pass
+    try:
+        return str(
+            locator.evaluate(
+                """el => {
+                    if (el.isContentEditable) return (el.innerText || '').trim();
+                    const value = String(el.value || '').trim();
+                    if (value) return value;
+                    return String(el.innerText || el.textContent || '').trim();
+                }"""
+            )
+            or ""
+        ).strip()
     except Exception:
         try:
             return (locator.inner_text(timeout=800) or "").strip()
@@ -1127,11 +1258,16 @@ def fill_if_empty(locator: Locator, value: str) -> bool:
             return False
     except Exception:
         return False
-    if _current_value(locator):
+    if not _is_empty_value(_current_value(locator)):
         return False
     try:
-        js_val = locator.evaluate("el => String(el.value || '').trim()")
-        if js_val:
+        js_val = locator.evaluate(
+            """el => {
+                if (el.isContentEditable) return (el.innerText || '').trim();
+                return String(el.value || '').trim();
+            }"""
+        )
+        if js_val and not _is_empty_value(str(js_val)):
             return False
     except Exception:
         pass
@@ -1143,6 +1279,25 @@ def fill_if_empty(locator: Locator, value: str) -> bool:
         locator.click(timeout=2_000)
     except Exception:
         pass
+    try:
+        editable = bool(locator.evaluate("el => !!el.isContentEditable"))
+    except Exception:
+        editable = False
+    if editable:
+        try:
+            locator.evaluate(
+                """(el, v) => {
+                    el.focus();
+                    el.innerHTML = '';
+                    el.innerText = v;
+                    el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }""",
+                value,
+            )
+            return True
+        except Exception:
+            pass
     try:
         locator.fill(value, timeout=3_000)
         return True
@@ -1435,6 +1590,20 @@ def _file_already_set(file_input: Locator) -> bool:
         return False
 
 
+def _attach_file(file_input: Locator, path: str) -> bool:
+    try:
+        file_input.set_input_files(path)
+        file_input.evaluate(
+            """el => {
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }"""
+        )
+        return True
+    except Exception:
+        return False
+
+
 def upload_document(page: Target, path: str, *, kind: str, label: str) -> bool:
     file_inputs = page.locator("input[type='file']")
     try:
@@ -1442,28 +1611,39 @@ def upload_document(page: Target, path: str, *, kind: str, label: str) -> bool:
     except PlaywrightTimeoutError:
         count = 0
 
+    ranked: list[tuple[int, Locator]] = []
     for index in range(count):
         file_input = file_inputs.nth(index)
         try:
             combined = f"{attr_blob(file_input)} {associated_label_text(page, file_input)}"
             field_kind = file_field_kind(combined)
-            if kind == FILE_KIND_RESUME:
-                if field_kind in {FILE_KIND_TRANSCRIPT, FILE_KIND_COVER}:
-                    continue
-            elif kind == FILE_KIND_TRANSCRIPT:
-                if field_kind != FILE_KIND_TRANSCRIPT:
-                    continue
-            elif kind == FILE_KIND_COVER:
-                if field_kind != FILE_KIND_COVER:
-                    continue
-            if _file_already_set(file_input):
-                return True
-            file_input.set_input_files(path)
-            print(f"  uploaded {label} -> {path}")
-            time.sleep(1.6)
-            return True
         except Exception:
             continue
+        if kind == FILE_KIND_RESUME:
+            if field_kind in {FILE_KIND_TRANSCRIPT, FILE_KIND_COVER}:
+                continue
+            rank = 0 if field_kind == FILE_KIND_RESUME else 1
+        elif field_kind != kind:
+            continue
+        else:
+            rank = 0
+        ranked.append((rank, file_input))
+    ranked.sort(key=lambda item: item[0])
+
+    uploaded = False
+    for _rank, file_input in ranked:
+        try:
+            if _file_already_set(file_input):
+                uploaded = True
+                continue
+            if _attach_file(file_input, path):
+                print(f"  uploaded {label} -> {path}")
+                uploaded = True
+        except Exception:
+            continue
+    if uploaded:
+        time.sleep(1.2)
+        return True
 
     if kind == FILE_KIND_TRANSCRIPT:
         button_pattern = r"transcript|academic record|grade report"
@@ -2694,7 +2874,9 @@ def fill_essay_answers(page: Target, profile: dict[str, Any], job: JobPosting | 
         return
 
     filled_ids: set[str] = set()
-    controls = page.locator("textarea, input[type='text'], input[type='number']")
+    controls = page.locator(
+        "textarea, input[type='text'], input[type='number'], [contenteditable='true']"
+    )
     try:
         total = min(controls.count(), 80)
     except PlaywrightTimeoutError:
@@ -2705,8 +2887,7 @@ def fill_essay_answers(page: Target, profile: dict[str, Any], job: JobPosting | 
         try:
             if not control.is_visible():
                 continue
-            current = (control.input_value(timeout=1_000) or "").strip()
-            if current:
+            if not _is_empty_value(_current_value(control)):
                 continue
         except Exception:
             continue
@@ -2731,9 +2912,21 @@ def fill_essay_answers(page: Target, profile: dict[str, Any], job: JobPosting | 
             text = _format_bank_answer(str(template), profile, job)
             try:
                 control.scroll_into_view_if_needed()
-                control.fill(text)
+                if not fill_if_empty(control, text):
+                    control.fill(text)
                 print(f"  filled essay '{qid}'")
                 filled_ids.add(qid)
+                try:
+                    parent = control.locator(
+                        "xpath=ancestor::*[self::div or self::li or self::fieldset][1]"
+                    )
+                    editors = parent.locator("[contenteditable='true']")
+                    for editor_index in range(min(editors.count(), 3)):
+                        editor = editors.nth(editor_index)
+                        if editor.is_visible() and _is_empty_value(_current_value(editor)):
+                            fill_if_empty(editor, text)
+                except Exception:
+                    pass
                 break
             except Exception:
                 continue
@@ -2768,6 +2961,84 @@ def fill_essay_answers(page: Target, profile: dict[str, Any], job: JobPosting | 
 
     if filled_ids:
         print(f"  essay bank filled {len(filled_ids)} question(s): {', '.join(sorted(filled_ids))}")
+
+
+def _iso_date_from_profile(profile: dict[str, Any]) -> tuple[str, str]:
+    year = str(profile.get("graduation_year") or "2026")
+    month_num = str(profile.get("graduation_month_number") or "12").zfill(2)
+    iso = f"{year}-{month_num}-15"
+    display = f"{month_num}/15/{year}"
+    return iso, display
+
+
+def fill_date_pickers(page: Target, profile: dict[str, Any]) -> int:
+    """Fill empty date inputs and Ashby-style Pick date… widgets."""
+    iso, display = _iso_date_from_profile(profile)
+    filled = 0
+    date_inputs = page.locator("input[type='date'], input[placeholder*='date' i]")
+    try:
+        total = min(date_inputs.count(), 40)
+    except Exception:
+        total = 0
+    for index in range(total):
+        control = date_inputs.nth(index)
+        try:
+            if not control.is_visible():
+                continue
+            type_attr = (control.get_attribute("type") or "").lower()
+        except Exception:
+            continue
+        value = iso if type_attr == "date" else display
+        if fill_if_empty(control, value):
+            print(f"  filled date field with {value}")
+            filled += 1
+
+    widgets = page.locator(
+        "[role='combobox'], button, input[type='text'], [class*='Date']"
+    )
+    try:
+        total = min(widgets.count(), 80)
+    except Exception:
+        total = 0
+    for index in range(total):
+        control = widgets.nth(index)
+        try:
+            if not control.is_visible():
+                continue
+        except Exception:
+            continue
+        blob = _question_text_for_control(page, control)
+        current = _current_value(control)
+        looks_date = (
+            "pick date" in current.lower()
+            or "pick date" in blob
+            or "select date" in blob
+            or looks_like(blob, FIELD_ALIASES["graduation_date"])
+            or looks_like(blob, FIELD_ALIASES["start_date"])
+        )
+        if not looks_date or not _is_empty_value(current):
+            continue
+        try:
+            if _looks_like_submit(control):
+                continue
+        except Exception:
+            pass
+        if fill_if_empty(control, display):
+            print(f"  filled date widget with {display}")
+            filled += 1
+            continue
+        try:
+            control.click(timeout=2_000)
+            time.sleep(0.25)
+            control.press_sequentially(display, delay=20)
+            control.press("Enter")
+            print(f"  typed date {display}")
+            filled += 1
+        except Exception:
+            continue
+    if filled:
+        print(f"  date pickers filled: {filled}")
+    return filled
 
 
 def fill_choice_bank(page: Target) -> int:
@@ -2837,6 +3108,10 @@ def fill_application(page: Page, profile: dict[str, Any], job: JobPosting | None
     print("[*] Filling age / employer / graduation facts...")
     for root in roots:
         fill_structured_facts(root, profile, job)
+
+    print("[*] Filling date pickers (best effort)...")
+    for root in roots:
+        fill_date_pickers(root, profile)
 
     print("[*] Answering offer-deadline questions (best effort)...")
     for root in roots:
@@ -2927,20 +3202,20 @@ def _select_looks_empty(select: Locator) -> bool:
 
 
 def collect_unanswered_fields(page: Page) -> list[dict[str, Any]]:
-    """Visible empty text/select fields the answer bank did not cover."""
+    """Visible empty text/select/custom widgets the answer bank did not cover."""
     found: list[dict[str, Any]] = []
     seen: set[str] = set()
     for root in application_roots(page):
         controls = root.locator(
-            "textarea, input[type='text'], input[type='number'], "
-            "input:not([type]), select"
+            "textarea, input[type='text'], input[type='number'], input[type='date'], "
+            "input:not([type]), select, [contenteditable='true'], [role='combobox']"
         )
         try:
-            total = min(controls.count(), 80)
+            total = min(controls.count(), 120)
         except Exception:
             total = 0
         for index in range(total):
-            if len(found) >= 20:
+            if len(found) >= 40:
                 return found
             control = controls.nth(index)
             try:
@@ -2948,6 +3223,8 @@ def collect_unanswered_fields(page: Page) -> list[dict[str, Any]]:
                     continue
                 type_attr = (control.get_attribute("type") or "").lower()
                 tag = (control.evaluate("el => el.tagName") or "").lower()
+                role = (control.get_attribute("role") or "").lower()
+                editable = bool(control.evaluate("el => !!el.isContentEditable"))
             except Exception:
                 continue
             if type_attr in {"hidden", "file", "submit", "button", "checkbox", "radio", "password"}:
@@ -2958,18 +3235,24 @@ def collect_unanswered_fields(page: Page) -> list[dict[str, Any]]:
             lowered = question.lower()
             if any(bit in lowered for bit in AI_SKIP_FIELD_BITS):
                 continue
-            kind = "select" if tag == "select" else ("textarea" if tag == "textarea" else "text")
+            if role == "combobox" or type_attr == "date":
+                kind = "select" if role == "combobox" else "date"
+            elif tag == "select":
+                kind = "select"
+            elif tag == "textarea" or editable:
+                kind = "textarea"
+            else:
+                kind = "text"
             options: list[str] = []
             if kind == "select":
-                if not _select_looks_empty(control):
-                    continue
-                options = _native_select_options(control)
-            else:
-                try:
-                    if (control.input_value(timeout=800) or "").strip():
+                if tag == "select":
+                    if not _select_looks_empty(control):
                         continue
-                except Exception:
+                    options = _native_select_options(control)
+                elif not _is_empty_value(_current_value(control)):
                     continue
+            elif not _is_empty_value(_current_value(control)):
+                continue
             fingerprint = f"{kind}:{lowered[:160]}"
             if fingerprint in seen:
                 continue
@@ -2998,7 +3281,19 @@ def _apply_ai_field(field: dict[str, Any], answer: dict[str, str]) -> bool:
     if maxlength and text and len(text) > maxlength:
         text = text[:maxlength]
     wanted = tuple(token.lower() for token in (choice, text) if token)
-    if kind == "select" and wanted:
+    if kind in {"select", "date"} and wanted:
+        if kind == "date":
+            _, display = _iso_date_from_profile({})
+            date_text = text or choice or display
+            if fill_if_empty(control, date_text):
+                return True
+            try:
+                control.click(timeout=2_000)
+                control.press_sequentially(date_text, delay=15)
+                control.press("Enter")
+                return True
+            except Exception:
+                pass
         if set(wanted) <= {"yes", "no", "true", "false"}:
             yn = "yes" if any(token in {"yes", "true"} for token in wanted) else "no"
             if select_yes_no_option(control, yn):
@@ -3071,7 +3366,7 @@ def fill_all_form_pages(
     if not form_fields_present(page):
         print("[warn] Could not find application fields.")
         return
-    invalid = visible_invalid_fields(page)
+    invalid = leftover_required_fields(page)
     if invalid:
         preview = "; ".join(invalid[:6])
         print(f"[*] Remaining blank/invalid fields: {preview}")
@@ -3119,17 +3414,28 @@ def wait_for_human_finish(
     *,
     reason: str = "",
 ) -> str:
-    """Pause only when a human must act (CAPTCHA). Next app waits."""
+    """Pause when a human must act. The bot does not type while waiting."""
     company = job.company if job else "this listing"
     title = job.title if job else ""
     url = job.best_url() if job else (page.url or "")
     job_id = job.id if job else ""
     captcha = reason == "captcha"
-    heading = (
-        "CAPTCHA — SOLVE IT IN CHROMIUM, THEN CLICK SUBMIT."
-        if captcha
-        else "FORM IS OPEN — EDIT ANYTHING YOU WANT. NEXT APP WAITS."
-    )
+    leftover = reason == "leftover"
+    if captcha:
+        heading = "CAPTCHA — SOLVE IT IN CHROMIUM, THEN CLICK SUBMIT."
+        step_one = "  1. Complete the CAPTCHA / bot check."
+        step_two = "  2. Click Submit yourself. The bot will not click Submit on a CAPTCHA page."
+        notes = "CAPTCHA — waiting for you to submit"
+    elif leftover:
+        heading = "LEFTOVER QUESTIONS — TYPE THEM YOURSELF. THE BOT WILL NOT TOUCH THIS PAGE."
+        step_one = "  1. Fill every remaining question in Chromium. The bot will not overwrite you."
+        step_two = "  2. Click Submit yourself when it looks right."
+        notes = "Waiting for you to finish leftover questions"
+    else:
+        heading = "FORM IS OPEN — EDIT ANYTHING YOU WANT. NEXT APP WAITS."
+        step_one = "  1. Check auto-filled values and complete anything blank."
+        step_two = "  2. Click Submit yourself when it looks right."
+        notes = job.notes if job is not None else ""
     banner = "\n".join(
         [
             "",
@@ -3142,10 +3448,8 @@ def wait_for_human_finish(
             "",
             "The next application will NOT open until this one is finished.",
             "In the Chromium window:",
-            "  1. Complete the CAPTCHA / bot check." if captcha else "  1. Check auto-filled values.",
-            "  2. Click Submit yourself. The bot will not click Submit on a CAPTCHA page."
-            if captcha
-            else "  2. Click Submit yourself when it looks right.",
+            step_one,
+            step_two,
             "",
             "When you are done:",
             "  • Wait until a thank-you page appears (Sheets updates automatically)",
@@ -3161,7 +3465,7 @@ def wait_for_human_finish(
             fill_status=STATUS_REVIEWING,
             prepped_at=utc_now(),
             sheet_error="",
-            notes="CAPTCHA — waiting for you to submit" if captcha else job.notes,
+            notes=notes,
         )
     write_review_signal(
         job_id,
@@ -3287,8 +3591,12 @@ def _sync_after_approval(job: JobPosting, notes: str = "") -> None:
         append_application(job, notes=job.notes)
         print("[*] Google Sheets tracker updated.")
     except Exception as exc:
-        print(f"[warn] Could not sync Google Sheets: {exc}")
-        print("       Retry later with: python tracker_sync.py --job-id", job.id)
+        detail = str(exc)
+        if "credentials.json missing" in detail:
+            print("[*] Saved locally. Add credentials.json later to sync Google Sheets.")
+        else:
+            print(f"[warn] Could not sync Google Sheets: {detail}")
+            print("       Retry later with: python tracker_sync.py --job-id", job.id)
 
 
 # ---------------------------------------------------------------------------
@@ -3338,12 +3646,25 @@ def run(
         print(f"[*] Filling {ats} application...")
         fill_all_form_pages(page, profile, job)
 
+        leftover = leftover_required_fields(page)
+        if leftover:
+            fill_remaining_with_ai(page, profile, job)
+            leftover = leftover_required_fields(page)
+
         if captcha_present(page):
             bot_notify(
                 f"[*] CAPTCHA on {job.company if job else 'listing'} — "
                 "solve it and click Submit. Everything else stays automatic."
             )
             status = wait_for_human_finish(page, profile, job, reason="captcha")
+        elif leftover:
+            preview = "; ".join(leftover[:6])
+            bot_notify(
+                f"[*] Some questions are still blank on {job.company if job else 'listing'}. "
+                "The bot will not click Submit or type over you.\n"
+                f"    Finish these in Chromium: {preview}"
+            )
+            status = wait_for_human_finish(page, profile, job, reason="leftover")
         elif auto_submit_enabled():
             bot_notify(
                 f"[*] Auto-submitting {job.company if job else 'listing'} — "
@@ -3357,18 +3678,19 @@ def run(
                 if job is not None:
                     _sync_after_approval(job, notes="Auto-submitted")
                 status = STATUS_APPLIED
+            elif outcome == "needs_review":
+                still = leftover_required_fields(page)
+                preview = "; ".join(still[:6]) if still else "remaining required questions"
+                bot_notify(
+                    f"[*] Auto-submit paused so you can finish the form.\n"
+                    f"    Still blank: {preview}"
+                )
+                status = wait_for_human_finish(page, profile, job, reason="leftover")
             else:
                 bot_notify(
-                    "[warn] Auto-submit failed and there is no CAPTCHA. "
-                    "Marking failed and moving to the next role."
+                    "[warn] Auto-submit could not confirm. Window stays open so you can finish."
                 )
-                if job is not None:
-                    update_match_status(
-                        job.id,
-                        fill_status=STATUS_FAILED,
-                        notes="Auto-submit could not confirm (no CAPTCHA).",
-                    )
-                status = STATUS_FAILED
+                status = wait_for_human_finish(page, profile, job, reason="leftover")
         else:
             if job is not None:
                 bot_notify(

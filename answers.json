@@ -34,6 +34,19 @@
       "answer": "I’m excited by {company} because the work is software that has to hold up in the real world, not a demo. I gravitate to platforms that turn messy operational data into decisions — the same problem I hit building an AI legal-request classifier at CBRE and a multi-role EHR for a clinic. I want to spend my new-grad years writing production Python/TypeScript, owning APIs and data paths, and shipping systems that people on the ground actually use. {company} is where I can do that at scale."
     },
     {
+      "id": "ai_technologies",
+      "any": [
+        "ai specific technologies",
+        "ai technologies you are comfortable",
+        "generative ai",
+        "llm",
+        "machine learning technologies",
+        "which ai tools",
+        "ai/ml technologies"
+      ],
+      "answer": "Python, TypeScript, Gemini and other LLM APIs, retrieval-style GenAI classifiers (CBRE Now Assist / legal-request routing), prompt-and-eval loops, and on-device sensor ML for SignalSafe. I am comfortable wiring models into production APIs, not only notebooks."
+    },
+    {
       "id": "daily_life_problem",
       "any": [
         "solve any problem that impacts your daily life",

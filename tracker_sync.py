@@ -42,6 +42,8 @@ SHEET_SCOPES = (
     "https://www.googleapis.com/auth/drive",
 )
 
+_MISSING_CREDS_LOGGED = False
+
 
 class TrackerError(RuntimeError):
     """Raised when the spreadsheet cannot be reached or updated."""
@@ -58,11 +60,13 @@ def _authorize():
 
     creds_path = service_account_path()
     if not creds_path.is_file():
-        raise TrackerError(
-            f"Service account file not found: {creds_path}\n"
-            "Download the JSON key from Google Cloud and save it as credentials.json "
-            "(or set GOOGLE_SERVICE_ACCOUNT_FILE)."
-        )
+        global _MISSING_CREDS_LOGGED
+        if not _MISSING_CREDS_LOGGED:
+            log.info(
+                "Google Sheets skipped — add credentials.json (or set GOOGLE_SERVICE_ACCOUNT_FILE)."
+            )
+            _MISSING_CREDS_LOGGED = True
+        raise TrackerError("credentials.json missing — local tracker only")
 
     credentials = Credentials.from_service_account_file(str(creds_path), scopes=SHEET_SCOPES)
     return gspread.authorize(credentials)
@@ -177,7 +181,8 @@ def append_application(
         result["error"] = str(exc)
         job.fill_status = STATUS_APPLIED
         job.sheet_error = str(exc)
-        log.warning("Sheet sync failed for %s: %s", job.id, exc)
+        if "credentials.json missing" not in str(exc):
+            log.warning("Sheet sync failed for %s: %s", job.id, exc)
 
     append_tracker_log(result)
     update_match_status(

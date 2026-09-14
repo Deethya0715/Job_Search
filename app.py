@@ -132,7 +132,7 @@ def _show_table(frame: pd.DataFrame) -> None:
     }
     st.dataframe(
         visible,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config=column_config,
         height=min(560, 52 + 36 * max(len(visible), 3)),
@@ -232,7 +232,7 @@ def render_monitor() -> None:
             st.info("Stop requested. Heartbeat will go idle.")
             st.rerun()
 
-        scrape_now = st.button("Scrape once now", use_container_width=True)
+        scrape_now = st.button("Scrape once now", width="stretch")
         if scrape_now:
             try:
                 with st.spinner("Querying every board…"):
@@ -248,7 +248,7 @@ def render_monitor() -> None:
                 st.rerun()
             except Exception as exc:
                 st.error(f"Scrape is not available here: {exc}")
-        if st.button("Refresh status", use_container_width=True):
+        if st.button("Refresh status", width="stretch"):
             st.rerun()
 
     with right:
@@ -360,21 +360,21 @@ def render_queue() -> None:
         else:
             st.info(f"Playwright is on **{current_label}**.")
         r1, r2, r3 = st.columns(3)
-        if r1.button("I submitted — sync & open next", type="primary", use_container_width=True):
+        if r1.button("I submitted — sync & open next", type="primary", width="stretch"):
             set_review_action("submitted")
             st.success("Told Playwright this one is submitted. Next role opens after the window closes.")
             st.rerun()
-        if r2.button("Skip this role — open next", use_container_width=True):
+        if r2.button("Skip this role — open next", width="stretch"):
             set_review_action("skip")
             st.info("Skipping this role. Next queued form will open.")
             st.rerun()
-        if r3.button("Leave as prepped — open next", use_container_width=True):
+        if r3.button("Leave as prepped — open next", width="stretch"):
             set_review_action("next")
             st.info("Keeping this row as ready for review. Next form will open.")
             st.rerun()
     elif waiting_ids:
         st.info(f"{len(waiting_ids)} role(s) queued for auto-apply.")
-        if st.button("Start auto-apply now", use_container_width=False):
+        if st.button("Start auto-apply now", width="content"):
             st.info(request_auto_prep() or "Queue is already empty.")
             st.rerun()
 
@@ -429,7 +429,7 @@ def render_queue() -> None:
     else:
         edited = st.data_editor(
             frame,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=min(560, 52 + 36 * max(len(frame), 3)),
             column_order=[
@@ -467,15 +467,15 @@ def render_queue() -> None:
     approve_selected = a1.button(
         "Approve selected & sync",
         type="primary",
-        use_container_width=True,
+        width="stretch",
         help="Use this when you submitted in another browser tab via Job link. Marks Applied and writes Sheets.",
     )
     approve_ready = a2.button(
         "Approve all ready for review",
-        use_container_width=True,
+        width="stretch",
     )
-    skip_selected = a3.button("Skip selected", use_container_width=True)
-    refresh = a4.button("Refresh queue", use_container_width=True)
+    skip_selected = a3.button("Skip selected", width="stretch")
+    refresh = a4.button("Refresh queue", width="stretch")
     if refresh:
         st.rerun()
 
@@ -533,7 +533,7 @@ def render_queue() -> None:
             "Only needed for failed preps or leftover pending rows. "
             "New matching roles are already auto-queued after each scrape."
         )
-        if st.button("Send selected to Playwright", use_container_width=True):
+        if st.button("Send selected to Playwright", width="stretch"):
             st.info(queue_for_playwright(selected_ids))
 
     st.subheader("Playwright log")
@@ -611,7 +611,7 @@ def render_tracker() -> None:
     )
     st.dataframe(
         view,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={"Job link": st.column_config.LinkColumn("Job link", display_text="Open")},
         height=420,

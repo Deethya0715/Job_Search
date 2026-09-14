@@ -192,7 +192,7 @@ def scrape_only() -> int:
     save_worker_status(
         state="running",
         pid=os.getpid(),
-        message="Scraping LinkedIn, Indeed, Glassdoor, ZipRecruiter, Google, Greenhouse, Lever…",
+        message="Scraping LinkedIn, Indeed, Google Jobs, Greenhouse, Lever, Ashby…",
         last_scrape_error="",
     )
     try:
