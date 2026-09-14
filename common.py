@@ -495,7 +495,12 @@ def append_log_file(path: Path, message: str) -> None:
 
 def bot_notify(message: str) -> None:
     """Print to the bot terminal and append bot.log so the dashboard can tail it."""
-    print(message)
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe = str(message).encode(encoding, errors="replace").decode(encoding, errors="replace")
+        print(safe)
     append_log_file(BOT_LOG_PATH, message)
 
 
@@ -690,10 +695,11 @@ def skip_non_automatable_jobs(job_ids: list[str] | None = None) -> int:
 
 
 def pending_auto_apply_ids() -> list[str]:
+    retryable = {STATUS_PENDING, STATUS_FAILED}
     return [
         job.id
         for job in load_match_jobs()
-        if job.fill_status == STATUS_PENDING
+        if job.fill_status in retryable
         and is_automatable_apply_url(job.best_url())
     ]
 
@@ -707,11 +713,15 @@ def spawn_auto_prep_bot() -> str:
         command.extend(["--limit", str(limit)])
 
     log_handle = BOT_LOG_PATH.open("a", encoding="utf-8")
+    child_env = os.environ.copy()
+    child_env["PYTHONUTF8"] = "1"
+    child_env["PYTHONIOENCODING"] = "utf-8"
     kwargs: dict[str, Any] = {
         "cwd": str(ROOT),
         "stdout": log_handle,
         "stderr": log_handle,
         "stdin": subprocess.DEVNULL,
+        "env": child_env,
     }
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP

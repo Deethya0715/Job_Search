@@ -37,13 +37,30 @@
   "current_employer": "N/A",
   "prior_employers": ["CBRE"],
   "degree": "B.S. in Computer Science",
+  "degree_type": "Bachelor's Degree",
+  "discipline": "Computer Science",
+  "major": "Computer Science",
   "school": "The University of Texas at Dallas",
+  "education": [
+    {
+      "school": "The University of Texas at Dallas",
+      "degree": "Bachelor's Degree",
+      "discipline": "Computer Science",
+      "end_month": "December",
+      "end_year": "2026"
+    }
+  ],
+  "preferred_work_location": "Colorado Springs, CO",
+  "has_technical_work_3mo_to_2yr": true,
+  "able_to_start_full_time": "2026",
   "work_authorization": {
     "us_citizen": true,
+    "us_person": true,
     "authorized_to_work": true,
     "requires_sponsorship": false,
     "status": "U.S. Citizen — authorized to work in the United States; no visa sponsorship required",
-    "export_control_status": "A United States citizen or national"
+    "export_control_status": "A United States citizen or national",
+    "export_control_eligible": true
   },
   "how_heard": "Google job search",
   "previously_applied": false,
@@ -51,7 +68,8 @@
   "security_clearance": {
     "eligible": true,
     "holds_now": false,
-    "level_held": "N/A - have never held U.S. security clearance"
+    "level_held": "N/A - have never held U.S. security clearance",
+    "us_person_and_clearance_eligible": true
   },
   "resume_path": "Deethyas_Resume.pdf",
   "transcript_path": "Sem5_Transcript.pdf",
@@ -90,6 +108,7 @@
     "min_match_score": 40,
     "country": "USA",
     "locations": ["United States"],
+    "preferred_locations": ["Colorado Springs, CO"],
     "search_terms": [
       "Software Engineer New Grad",
       "New Grad Software Engineer",

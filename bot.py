@@ -18,8 +18,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 try:
-    sys.stdout.reconfigure(line_buffering=True)
-    sys.stderr.reconfigure(line_buffering=True)
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 except Exception:
     pass
 
@@ -217,13 +217,21 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "linkedin": ("linkedin", "linkedin url", "linkedin profile"),
     "github": ("github", "github url", "github profile", "portfolio", "website"),
     "school": ("school", "university", "college", "institution"),
-    "degree": ("degree", "major"),
+    "degree": ("degree", "degree type"),
+    "discipline": (
+        "discipline",
+        "major",
+        "field of study",
+        "area of study",
+        "concentration",
+    ),
     "graduation_date": (
         "graduation",
         "graduation date",
         "grad date",
         "expected graduation",
         "expected grad",
+        "end date",
     ),
     "graduation_year": (
         "graduation year",
@@ -232,6 +240,8 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "expected graduation year",
         "year you will graduate",
         "year you'll graduate",
+        "end date year",
+        "end year",
     ),
     "graduation_month": (
         "graduation month",
@@ -239,6 +249,8 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "grad month",
         "expected graduation month",
         "month you will graduate",
+        "end date month",
+        "end month",
     ),
     "age": (
         "age",
@@ -2280,8 +2292,16 @@ def fill_common_identity(page: Target, profile: dict[str, Any]) -> None:
 
 
 def fill_education(page: Target, profile: dict[str, Any]) -> None:
-    fill_by_aliases(page, FIELD_ALIASES["school"], profile.get("school", ""))
-    fill_by_aliases(page, FIELD_ALIASES["degree"], profile.get("degree", ""))
+    school = profile.get("school", "")
+    degree_type = (
+        usable_profile_value(profile.get("degree_type", "")) or "Bachelor's Degree"
+    )
+    discipline = (
+        usable_profile_value(profile.get("discipline", "")) or "Computer Science"
+    )
+    fill_by_aliases(page, FIELD_ALIASES["school"], school)
+    fill_by_aliases(page, FIELD_ALIASES["degree"], degree_type)
+    fill_by_aliases(page, FIELD_ALIASES["discipline"], discipline)
     year = str(profile.get("graduation_year") or "2026")
     month = str(profile.get("graduation_month") or "December")
     month_num = str(profile.get("graduation_month_number") or "12")
@@ -2309,6 +2329,15 @@ def fill_education(page: Target, profile: dict[str, Any]) -> None:
             elif looks_like(context, FIELD_ALIASES["graduation_date"]):
                 if select_native_option(select, (month.lower(), month_num, year, "dec")):
                     print("  selected graduation date")
+            elif looks_like(context, FIELD_ALIASES["degree"]):
+                if select_native_option(select, (degree_type.lower(), "bachelor")):
+                    print(f"  selected degree {degree_type}")
+            elif looks_like(context, FIELD_ALIASES["discipline"]):
+                if select_native_option(select, (discipline.lower(), "computer science")):
+                    print(f"  selected discipline {discipline}")
+            elif looks_like(context, FIELD_ALIASES["school"]):
+                if select_native_option(select, (school.lower(), "dallas")):
+                    print(f"  selected school {school}")
         except Exception:
             continue
 

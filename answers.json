@@ -499,6 +499,38 @@
       ]
     },
     {
+      "id": "us_person_clearance_eligibility",
+      "any": [
+        "u.s. person status and/or u.s. clearance eligibility",
+        "us person status and/or us clearance eligibility",
+        "export-controlled information/facilities",
+        "export-controlled information"
+      ],
+      "choose": ["yes"]
+    },
+    {
+      "id": "top_location_preference",
+      "any": [
+        "top location preference",
+        "what is your top location preference"
+      ],
+      "choose": [
+        "colorado springs, co",
+        "colorado springs"
+      ]
+    },
+    {
+      "id": "technical_work_start_2026",
+      "any": [
+        "minimum of 3 months - 2 years of technical",
+        "3 months - 2 years of technical work",
+        "technical internship and able to start full time in 2026",
+        "able to start full time in 2026",
+        "start full time in 2026"
+      ],
+      "choose": ["yes"]
+    },
+    {
       "id": "export_controls",
       "any": [
         "export controls",
