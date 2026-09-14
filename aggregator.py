@@ -3,12 +3,12 @@ Universal job-board aggregator.
 
 Pulls Software Engineer New Grad / Full Stack listings from LinkedIn, Indeed,
 Glassdoor, ZipRecruiter, Google Jobs (via python-jobspy), Greenhouse, Lever,
-an optional JSearch API, and the public Simplify new-grad list.
+Workday (banks and corporates), USAJOBS (federal), an optional JSearch API,
+and the public Simplify new-grad list.
 
-Applies a strict U.S.-only location filter, a $150k compensation floor, scores
-each posting against profile.json, writes new matches to matches.json, and
-queues those new $150k+ roles for automatic Playwright prep (bot.py fills
-the form and pauses before Submit).
+Applies a strict U.S.-only location filter, a $100k compensation floor with a
+$150k preference for ranking, scores each posting against profile.json, writes
+new matches to matches.json, and queues those roles for Playwright.
 """
 
 from __future__ import annotations
@@ -26,10 +26,12 @@ import requests
 
 from common import (
     ATS_COMPANIES_PATH,
+    DEFAULT_PREFERRED_SALARY,
     DEFAULT_SALARY_FLOOR,
     MATCHES_PATH,
     SEEN_JOBS_PATH,
     JobPosting,
+    env,
     load_json,
     load_profile,
     make_job_id,
@@ -57,15 +59,23 @@ SIMPLIFY_LISTING_URLS = (
 )
 
 SWE_TITLE_RE = re.compile(
+    r"("
     r"\b(software|full[\s-]?stack|fullstack|front[\s-]?end|back[\s-]?end|"
-    r"swe|sde|platform engineer|web engineer)\b",
+    r"swe|sde|platform engineer|web engineer|computer scientist|"
+    r"computer engineer|software developer|applications? developer|"
+    r"software development engineer|technology analyst)\b"
+    r"|it specialist.{0,48}(appsw|software|sysanalysis)"
+    r")",
     re.I,
 )
 NEW_GRAD_RE = re.compile(
     r"(new[\s-]*grad(?:uate)?s?|university[\s-]*grad(?:uate)?s?|"
     r"college[\s-]*grad(?:uate)?s?|early[\s-]*career|entry[\s-]*level|"
     r"class of 202[5-7]|graduating|recent[\s-]*grad(?:uate)?s?|"
-    r"associate software|junior|0\s*[-to]+\s*[12]\s+years?)",
+    r"associate software|junior|0\s*[-to]+\s*[12]\s+years?|"
+    r"pathways|campus|university hire|analyst program|"
+    r"development program|software engineer\s*i\b|software engineer 1\b|"
+    r"rotational)",
     re.I,
 )
 FULL_STACK_RE = re.compile(r"\bfull[\s-]?stack|fullstack\b", re.I)
@@ -139,8 +149,14 @@ US_CITY_RE = re.compile(
     r"annapolis junction|fort collins|broomfield|newport beach|"
     r"costa mesa|culver city|kirkland|san bruno|wakefield|westborough|"
     r"springfield|orlando|greenwich|lafayette|indianapolis|madison|"
-    r"durham|northridge|brooklyn|manhattan|queens"
+    r"durham|northridge|brooklyn|manhattan|queens|"
+    r"mckinney|plano|frisco|irving|richardson|allen|garland|fort worth"
     r")\b",
+    re.I,
+)
+US_FED_LOCATION_RE = re.compile(
+    r"(location negotiable|anywhere in the u\.?s|multiple locations|"
+    r"nationwide|various locations)",
     re.I,
 )
 GENERIC_REMOTE_RE = re.compile(
@@ -244,7 +260,107 @@ HIGH_COMP_COMPANIES = {
     "virtu",
     "ctc",
     "chicago trading",
+    "jpmorgan",
+    "jp morgan",
+    "jpmorgan chase",
+    "goldman",
+    "goldman sachs",
+    "morgan stanley",
+    "citigroup",
+    "citibank",
+    "citi",
+    "bank of america",
+    "wells fargo",
+    "capital one",
+    "american express",
+    "visa",
+    "mastercard",
+    "blackrock",
+    "fidelity",
+    "schwab",
+    "bny mellon",
+    "usaa",
+    "pnc",
+    "truist",
+    "ally",
+    "vanguard",
+    "state street",
+    "tiaa",
+    "paypal",
 }
+
+# Corporates / defense where new-grad SWE commonly clears $100k but not $150k.
+CORPORATE_COMPANIES = {
+    "boeing",
+    "northrop",
+    "lockheed",
+    "leidos",
+    "gdit",
+    "booz allen",
+    "caci",
+    "parsons",
+    "rtx",
+    "raytheon",
+    "target",
+    "walmart",
+    "disney",
+    "humana",
+    "pfizer",
+    "abbott",
+    "cigna",
+    "chevron",
+    "intel",
+    "cisco",
+    "micron",
+    "autodesk",
+    "procter",
+    "nationwide",
+    "prudential",
+    "honeywell",
+    "verizon",
+    "dell",
+    "ibm",
+    "oracle",
+}
+
+GOVERNMENT_TOKENS = {
+    "department of defense",
+    "department of the navy",
+    "department of the army",
+    "department of the air force",
+    "department of energy",
+    "department of veterans",
+    "department of homeland",
+    "department of commerce",
+    "department of the treasury",
+    "department of justice",
+    "department of state",
+    "national security agency",
+    "central intelligence",
+    "federal bureau",
+    "national aeronautics",
+    "internal revenue service",
+    "social security administration",
+    "national institutes of health",
+    "centers for disease",
+    "cybersecurity and infrastructure",
+    "general services administration",
+    "national geospatial",
+    "defense intelligence",
+    "space force",
+    "lawrence livermore",
+    "los alamos",
+    "oak ridge",
+    "sandia",
+    "argonne",
+    "usajobs",
+}
+
+WORKDAY_QUERIES = (
+    "new grad software engineer",
+    "early career software",
+)
+WORKDAY_PAGE_SIZE = 20
 
 HCOL_TOKENS = (
     "san francisco",
@@ -280,8 +396,10 @@ def _norm(text: str) -> str:
 
 def excluded_by_title(title: str, exclude_keywords: list[str]) -> bool:
     hay = _norm(title)
-    if any(token in hay for token in exclude_keywords):
-        return True
+    for token in exclude_keywords:
+        cleaned = token.strip().lower().strip(".")
+        if cleaned and re.search(rf"\b{re.escape(cleaned)}\b", hay):
+            return True
     return bool(
         re.search(
             r"\b(sr\.?|senior|staff|principal|director|manager|lead|"
@@ -313,6 +431,8 @@ def is_us_role(location: str, description: str = "", url: str = "", title: str =
     if not loc:
         return True
     if loc in {"us", "usa", "u.s.", "u.s.a.", "united states"}:
+        return True
+    if US_FED_LOCATION_RE.search(loc) and not NON_US_RE.search(loc):
         return True
     if GENERIC_REMOTE_RE.search(loc) and not NON_US_RE.search(loc):
         return True
@@ -375,13 +495,27 @@ def parse_salary_from_text(text: str) -> tuple[int | None, int | None]:
     return None, None
 
 
-def company_in_high_comp(company: str) -> bool:
+def company_matches(company: str, tokens: set[str]) -> bool:
     name = _norm(company)
     padded = f" {name} "
-    for token in HIGH_COMP_COMPANIES:
+    for token in tokens:
         if name == token or padded.find(f" {token} ") >= 0 or name.startswith(token + " "):
             return True
     return False
+
+
+def company_in_high_comp(company: str) -> bool:
+    return company_matches(company, HIGH_COMP_COMPANIES)
+
+
+def company_in_corporate(company: str) -> bool:
+    return company_matches(company, CORPORATE_COMPANIES)
+
+
+def is_government_employer(job: JobPosting) -> bool:
+    if job.source == "usajobs":
+        return True
+    return company_matches(job.company, GOVERNMENT_TOKENS)
 
 
 def location_is_hcol(location: str) -> bool:
@@ -407,7 +541,24 @@ def estimate_salary(job: JobPosting) -> tuple[int | None, int | None, bool]:
     if company_in_high_comp(job.company):
         return 155_000, 190_000, True
 
+    if company_in_corporate(job.company) or job.source == "workday":
+        return 115_000, 145_000, True
+
+    if is_government_employer(job):
+        return 100_000, 130_000, True
+
     return None, None, False
+
+
+def salary_preference_rank(job: JobPosting, preferred: int) -> int:
+    """2 = at/above preferred, 1 = max could reach it, 0 = below."""
+    low = job.salary_min or 0
+    high = job.salary_max or low
+    if low >= preferred:
+        return 2
+    if high >= preferred:
+        return 1
+    return 0
 
 
 def meets_salary_floor(job: JobPosting, floor: int) -> bool:
@@ -448,7 +599,7 @@ def resume_similarity(job: JobPosting, profile: dict[str, Any]) -> tuple[float, 
     title_bits = 0.0
     if SWE_TITLE_RE.search(job.title):
         title_bits += 40
-    if NEW_GRAD_RE.search(job.title) or job.source == "simplify":
+    if NEW_GRAD_RE.search(job.title) or job.source in {"simplify", "usajobs"}:
         title_bits += 45
     if FULL_STACK_RE.search(job.title):
         title_bits += 20
@@ -688,28 +839,218 @@ def fetch_lever_board(token: str) -> list[JobPosting]:
     return jobs
 
 
+def fetch_ashby_board(token: str) -> list[JobPosting]:
+    url = f"https://api.ashbyhq.com/posting-api/job-board/{token}"
+    try:
+        response = SESSION.get(url, timeout=REQUEST_TIMEOUT)
+        if response.status_code == 404:
+            return []
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        log.debug("Ashby %s: %s", token, exc)
+        return []
+
+    jobs: list[JobPosting] = []
+    for item in payload.get("jobs") or []:
+        title = (item.get("title") or "").strip()
+        apply_url = (item.get("jobUrl") or item.get("applyUrl") or "").strip()
+        if not title or not apply_url:
+            continue
+        location_raw = item.get("location")
+        if isinstance(location_raw, list):
+            location = ", ".join(str(part) for part in location_raw if part)
+        else:
+            location = str(location_raw or "")
+        company = token.replace("-", " ").title()
+        jobs.append(
+            JobPosting(
+                id=make_job_id("ashby", str(item.get("id") or ""), apply_url, company, title),
+                title=title,
+                company=company,
+                location=location,
+                source="ashby",
+                url=apply_url,
+                apply_url=apply_url,
+                description=_strip_html(item.get("descriptionHtml") or item.get("descriptionPlain") or ""),
+                date_posted=str(item.get("publishedDate") or item.get("updatedAt") or ""),
+            )
+        )
+    return jobs
+
+
+def fetch_workday_board(board: dict[str, Any]) -> list[JobPosting]:
+    name = str(board.get("name") or board.get("tenant") or "Company").strip()
+    host = str(board.get("host") or "").strip()
+    tenant = str(board.get("tenant") or "").strip()
+    site = str(board.get("site") or "").strip()
+    if not host or not tenant or not site:
+        return []
+
+    jobs: list[JobPosting] = []
+    seen_paths: set[str] = set()
+    for query in WORKDAY_QUERIES:
+        url = f"https://{host}/wday/cxs/{tenant}/{site}/jobs"
+        try:
+            response = SESSION.post(
+                url,
+                json={
+                    "appliedFacets": {},
+                    "limit": WORKDAY_PAGE_SIZE,
+                    "offset": 0,
+                    "searchText": query,
+                },
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                timeout=REQUEST_TIMEOUT,
+            )
+            if response.status_code != 200:
+                continue
+            payload = response.json()
+        except Exception as exc:
+            log.debug("Workday %s: %s", name, exc)
+            continue
+
+        for item in payload.get("jobPostings") or []:
+            title = (item.get("title") or "").strip()
+            path = (item.get("externalPath") or "").strip()
+            if not title or not path or path in seen_paths:
+                continue
+            seen_paths.add(path)
+            if not path.startswith("/"):
+                path = "/" + path
+            apply_url = f"https://{host}/en-US/{site}{path}"
+            location = (item.get("locationsText") or "").strip()
+            jobs.append(
+                JobPosting(
+                    id=make_job_id("workday", f"{tenant}:{path}", apply_url, name, title),
+                    title=title,
+                    company=name,
+                    location=location,
+                    source="workday",
+                    url=apply_url,
+                    apply_url=apply_url,
+                    description=f"Workday listing at {name}.",
+                    date_posted=str(item.get("postedOn") or ""),
+                )
+            )
+    return jobs
+
+
+def scrape_usajobs(email: str = "") -> list[JobPosting]:
+    api_key = env("USAJOBS_API_KEY")
+    user_email = env("USAJOBS_EMAIL") or email
+    if not api_key:
+        log.info(
+            "USAJOBS skipped — set USAJOBS_API_KEY in .env "
+            "(free at https://developer.usajobs.gov/)."
+        )
+        return []
+
+    headers = {
+        "Host": "data.usajobs.gov",
+        "User-Agent": user_email or "automated-job-monitor",
+        "Authorization-Key": api_key,
+    }
+    jobs: list[JobPosting] = []
+    for page in (1, 2, 3):
+        try:
+            response = SESSION.get(
+                "https://data.usajobs.gov/api/search",
+                headers=headers,
+                params={
+                    "JobCategoryCode": "1550;2210;0854;1560",
+                    "HiringPath": "graduates;public",
+                    "WhoMayApply": "public",
+                    "DatePosted": "30",
+                    "ResultsPerPage": "50",
+                    "Page": str(page),
+                    "Keyword": "software",
+                    "PayGradeHigh": "12",
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            log.warning("USAJOBS page %s failed: %s", page, exc)
+            break
+
+        items = ((payload.get("SearchResult") or {}).get("SearchResultItems") or [])
+        if not items:
+            break
+        for wrapper in items:
+            descriptor = wrapper.get("MatchedObjectDescriptor") or {}
+            title = (descriptor.get("PositionTitle") or "").strip()
+            apply_urls = descriptor.get("ApplyURI") or []
+            apply_url = (
+                (apply_urls[0] if apply_urls else "")
+                or descriptor.get("PositionURI")
+                or ""
+            ).strip()
+            if not title or not apply_url:
+                continue
+            company = (
+                descriptor.get("OrganizationName")
+                or descriptor.get("DepartmentName")
+                or "U.S. Government"
+            )
+            location = descriptor.get("PositionLocationDisplay") or ""
+            pay = (descriptor.get("PositionRemuneration") or [{}])[0]
+            salary_min = _as_int(pay.get("MinimumRange"))
+            salary_max = _as_int(pay.get("MaximumRange"))
+            details = (descriptor.get("UserArea") or {}).get("Details") or {}
+            description = _strip_html(
+                str(details.get("JobSummary") or descriptor.get("QualificationSummary") or "")
+            )
+            jobs.append(
+                JobPosting(
+                    id=make_job_id(
+                        "usajobs",
+                        str(wrapper.get("MatchedObjectId") or descriptor.get("PositionID") or ""),
+                        apply_url,
+                        company,
+                        title,
+                    ),
+                    title=title,
+                    company=str(company).strip(),
+                    location=str(location).strip(),
+                    source="usajobs",
+                    url=apply_url,
+                    apply_url=apply_url,
+                    description=description,
+                    salary_min=salary_min,
+                    salary_max=salary_max,
+                    date_posted=str(descriptor.get("PublicationStartDate") or ""),
+                    notes="Sourced from USAJOBS.",
+                )
+            )
+    log.info("USAJOBS collected %s raw postings.", len(jobs))
+    return jobs
+
+
 def scrape_ats_boards() -> list[JobPosting]:
-    config = load_json(ATS_COMPANIES_PATH, {"greenhouse": [], "lever": []})
+    config = load_json(
+        ATS_COMPANIES_PATH,
+        {"greenhouse": [], "lever": [], "ashby": [], "workday": []},
+    )
     greenhouse_tokens = list(config.get("greenhouse") or [])
     lever_tokens = list(config.get("lever") or [])
+    ashby_tokens = list(config.get("ashby") or [])
+    workday_boards = [board for board in (config.get("workday") or []) if isinstance(board, dict)]
     jobs: list[JobPosting] = []
 
-    def run_greenhouse(token: str) -> list[JobPosting]:
-        return fetch_greenhouse_board(token)
-
-    def run_lever(token: str) -> list[JobPosting]:
-        return fetch_lever_board(token)
-
     with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = [pool.submit(run_greenhouse, token) for token in greenhouse_tokens]
-        futures += [pool.submit(run_lever, token) for token in lever_tokens]
+        futures = [pool.submit(fetch_greenhouse_board, token) for token in greenhouse_tokens]
+        futures += [pool.submit(fetch_lever_board, token) for token in lever_tokens]
+        futures += [pool.submit(fetch_ashby_board, token) for token in ashby_tokens]
+        futures += [pool.submit(fetch_workday_board, board) for board in workday_boards]
         for future in as_completed(futures):
             try:
                 jobs.extend(future.result())
             except Exception as exc:
                 log.debug("ATS worker failed: %s", exc)
 
-    log.info("Greenhouse/Lever collected %s raw postings.", len(jobs))
+    log.info("ATS boards collected %s raw postings.", len(jobs))
     return jobs
 
 
@@ -860,6 +1201,7 @@ def filter_and_score(
 ) -> list[JobPosting]:
     prefs = profile.get("preferences") or {}
     floor = int(prefs.get("salary_floor") or DEFAULT_SALARY_FLOOR)
+    preferred = int(prefs.get("preferred_salary") or DEFAULT_PREFERRED_SALARY)
     min_score = float(prefs.get("min_match_score") or 0)
     exclude = [str(word).lower() for word in prefs.get("exclude_title_keywords") or []]
 
@@ -877,7 +1219,8 @@ def filter_and_score(
         new_grad_ok = bool(NEW_GRAD_RE.search(job.title))
         full_stack_ok = bool(FULL_STACK_RE.search(job.title))
         simplify_ok = job.source == "simplify" and swe_ok
-        if require_new_grad_signal and not (new_grad_ok or full_stack_ok or simplify_ok):
+        gov_ok = job.source == "usajobs" and swe_ok
+        if require_new_grad_signal and not (new_grad_ok or full_stack_ok or simplify_ok or gov_ok):
             continue
         if not swe_ok and not full_stack_ok:
             continue
@@ -900,7 +1243,14 @@ def filter_and_score(
 
     if skipped_non_us:
         log.info("Discarded %s postings outside the United States.", skipped_non_us)
-    kept.sort(key=lambda item: (-item.match_score, item.company.lower(), item.title.lower()))
+    kept.sort(
+        key=lambda item: (
+            -salary_preference_rank(item, preferred),
+            -item.match_score,
+            item.company.lower(),
+            item.title.lower(),
+        )
+    )
     return kept
 
 
@@ -950,7 +1300,11 @@ def persist_matches(new_jobs: list[JobPosting], seen: dict[str, Any]) -> list[Jo
 
     ordered = sorted(
         queued.values(),
-        key=lambda raw: (-float(raw.get("match_score") or 0), str(raw.get("company") or "")),
+        key=lambda raw: (
+            -int(float(raw.get("salary_min") or 0) >= DEFAULT_PREFERRED_SALARY),
+            -float(raw.get("match_score") or 0),
+            str(raw.get("company") or ""),
+        ),
     )
     payload = {
         "generated_at": now,
@@ -987,19 +1341,20 @@ def discover(
     profile = profile or load_profile()
     prefs = profile.get("preferences") or {}
     terms = list(prefs.get("search_terms") or ["Software Engineer New Grad"])
-    from common import env
+    floor = int(prefs.get("salary_floor") or DEFAULT_SALARY_FLOOR)
 
     collected: list[JobPosting] = []
     if not skip_jobspy:
         collected.extend(scrape_jobspy(terms, hours_old=hours_old, results_wanted=results_wanted))
     collected.extend(scrape_ats_boards())
     collected.extend(scrape_simplify_newgrad())
+    collected.extend(scrape_usajobs(str(profile.get("email") or "")))
     collected.extend(scrape_jsearch(terms, env("RAPIDAPI_KEY")))
 
     unique = dedupe(collected)
     log.info("Raw unique postings: %s", len(unique))
     matched = filter_and_score(unique, profile)
-    log.info("Postings after $150k + similarity filters: %s", len(matched))
+    log.info("Postings after $%sk + similarity filters: %s", floor // 1000, len(matched))
     seen = load_seen()
     fresh = persist_matches(matched, seen)
     log.info("Brand-new matches written: %s", len(fresh))
@@ -1013,7 +1368,7 @@ def discover(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Monitor major job boards for $150k+ New Grad / Full Stack SWE roles."
+        description="Monitor major job boards for $100k+ New Grad / Full Stack SWE roles."
     )
     parser.add_argument("--hours-old", type=int, default=72, help="JobSpy freshness window.")
     parser.add_argument(
@@ -1087,8 +1442,8 @@ def main() -> None:
         )
     else:
         print(
-            f"\nQueued {len(fresh)} $150k+ role(s). Greenhouse/Lever/Ashby forms "
-            "are auto-applied when AUTO_SUBMIT=1; other portals are skipped."
+            f"\nQueued {len(fresh)} matching role(s). $150k+ listings rank first. "
+            "Greenhouse/Lever/Ashby forms open one at a time; other portals are skipped."
         )
 
 

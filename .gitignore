@@ -16,6 +16,7 @@ tracker_log.json
 worker_status.json
 worker.log
 .bot_running
+.bot_review.json
 .worker_stop
 prep_queue.json
 *.tmp

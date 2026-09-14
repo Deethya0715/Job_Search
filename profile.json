@@ -29,7 +29,7 @@
   },
   "resume_path": "Deethyas_Resume.pdf",
   "links": {
-    "linkedin": "https://www.linkedin.com/in/YOUR_PROFILE",
+    "linkedin": "https://www.linkedin.com/in/deethyajanjanam/",
     "github": "https://github.com/Deethya0715"
   },
   "skills": [
@@ -58,7 +58,8 @@
     "patent"
   ],
   "preferences": {
-    "salary_floor": 150000,
+    "salary_floor": 100000,
+    "preferred_salary": 150000,
     "min_match_score": 40,
     "country": "USA",
     "locations": ["United States"],
@@ -68,7 +69,9 @@
       "University Graduate Software Engineer",
       "Full Stack Engineer New Grad",
       "Early Career Software Engineer",
-      "Software Engineer University Grad 2026"
+      "Software Engineer University Grad 2026",
+      "Pathways Computer Scientist",
+      "New Grad Software Engineer Bank"
     ],
     "exclude_title_keywords": [
       "senior",

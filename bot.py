@@ -2,8 +2,8 @@
 Job-application form filler.
 
 Opens Greenhouse, Lever, and Ashby listings, fills fields from profile.json,
-and uploads Deethyas_Resume.pdf. With AUTO_SUBMIT=1 it also clicks Submit.
-With AUTO_SUBMIT=0 it still pauses before Submit for a human review.
+and uploads Deethyas_Resume.pdf. One application stays open until you edit
+and Submit it; the next role does not start until this one is finished.
 """
 
 from __future__ import annotations
@@ -355,8 +355,8 @@ def parse_args() -> argparse.Namespace:
         "--auto-prep",
         action="store_true",
         help=(
-            "Automatically fill queued $150k+ matches without confirmation prompts. "
-            "Submits when AUTO_SUBMIT=1; otherwise pauses before Submit."
+            "Automatically fill queued $150k+ matches one at a time. "
+            "Each form stays open for you to edit and Submit before the next one opens."
         ),
     )
     parser.add_argument(
@@ -1069,6 +1069,12 @@ def upload_resume(page: Target, resume_path: str) -> bool:
             # Prefer resume/CV inputs; skip cover-letter-only pickers.
             if "cover" in combined and "resume" not in combined and "cv" not in combined:
                 continue
+            try:
+                already = file_input.evaluate("el => !!(el.files && el.files.length)")
+            except Exception:
+                already = False
+            if already:
+                return True
             file_input.set_input_files(resume_path)
             print(f"  uploaded resume -> {resume_path}")
             time.sleep(1.6)
@@ -2028,12 +2034,12 @@ def fill_all_form_pages(
         decline_self_identify(page)
         check_consent_boxes(page)
         answer_hear_about(page)
-        time.sleep(0.5)
-        fill_application(page, profile, job)
-        decline_self_identify(page)
 
         signature = _form_page_key(page)
         seen.add(signature)
+        if step == 0 and not form_fields_present(page):
+            print("[warn] Could not find application fields. Leaving the page open for you.")
+            return
         if not click_continue_control(page):
             invalid = visible_invalid_fields(page)
             if invalid:

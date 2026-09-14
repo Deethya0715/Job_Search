@@ -4,13 +4,15 @@ Streamlit control plane for the job-hunting engine.
 Tabs:
   1. Live Monitor Status  — start/stop the hourly worker
   2. Discovered Jobs Feed — scored listings from every board
-  3. Application Queue    — auto-prepped roles waiting for bulk review
+  3. Application Queue    — one open form at a time; edit then Submit
   4. Tracker Sync Status  — rows pushed to Google Sheets
 """
 
 from __future__ import annotations
 
 import traceback
+
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -23,6 +25,7 @@ try:
         STATUS_PENDING,
         STATUS_PREPPED,
         STATUS_PREPPING,
+        STATUS_REVIEWING,
         STATUS_SKIPPED,
         STATUS_SYNCED,
         WORKER_LOG_PATH,
@@ -37,12 +40,14 @@ try:
         load_match_jobs,
         load_prep_queue_ids,
         load_profile,
+        load_review_signal,
         load_seen_jobs,
         load_tracker_log,
         load_worker_status,
         local_now,
         request_auto_prep,
         service_account_path,
+        set_review_action,
         status_label,
         update_match_status,
     )
@@ -226,7 +231,7 @@ def render_monitor() -> None:
 
                     fresh = discover(load_profile())
                 extra = (
-                    f" Playwright will auto-apply {len(fresh)} new $150k+ Greenhouse/Lever/Ashby role(s)."
+                    f" Playwright will open {len(fresh)} new matching Greenhouse/Lever/Ashby role(s) one at a time."
                     if fresh
                     else ""
                 )
@@ -287,12 +292,20 @@ def render_queue() -> None:
         job
         for job in jobs
         if job.fill_status
-        in {STATUS_PENDING, STATUS_PREPPING, STATUS_PREPPED, STATUS_APPLIED, STATUS_FAILED}
+        in {
+            STATUS_PENDING,
+            STATUS_PREPPING,
+            STATUS_REVIEWING,
+            STATUS_PREPPED,
+            STATUS_APPLIED,
+            STATUS_FAILED,
+        }
     ]
     queue.sort(key=lambda job: (-job.match_score, job.company.lower()))
 
     pending_n = sum(1 for job in queue if job.fill_status == STATUS_PENDING)
     prepping_n = sum(1 for job in queue if job.fill_status == STATUS_PREPPING)
+    reviewing_n = sum(1 for job in queue if job.fill_status == STATUS_REVIEWING)
     ready_n = sum(1 for job in queue if job.fill_status == STATUS_PREPPED)
     applied_n = sum(1 for job in queue if job.fill_status == STATUS_APPLIED)
     failed_n = sum(1 for job in queue if job.fill_status == STATUS_FAILED)
@@ -300,47 +313,55 @@ def render_queue() -> None:
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Queued for prep", pending_n)
-    c2.metric("Prepping now", prepping_n)
+    c2.metric("Open in browser", reviewing_n or prepping_n)
     c3.metric("Ready for review", ready_n)
     c4.metric("Submitted / failed", f"{applied_n} / {failed_n}")
 
+    st.info(
+        "Playwright opens **one** Greenhouse/Lever/Ashby form at a time, fills what it can, "
+        "and leaves Chromium open. Edit anything, click **Submit yourself**, then use the "
+        "buttons below. The next role will not open until this one is finished."
+    )
+
     if auto_submit_enabled():
-        st.success(
-            "AUTO_SUBMIT is on. Playwright will fill Greenhouse, Lever, and Ashby forms "
-            "and click Submit. Company portals (Workday, TikTok, Google, etc.) stay skipped."
+        st.warning(
+            "AUTO_SUBMIT is on in `.env`. Incomplete auto-submits still pause for you; "
+            "set AUTO_SUBMIT=0 if you always want to click Submit yourself."
         )
 
     if bot_is_running():
         lock = bot_lock_info()
-        current = find_match(str(lock.get("job_id") or ""))
+        signal = load_review_signal()
+        current = find_match(str(lock.get("job_id") or signal.get("job_id") or ""))
         current_label = (
             f"{current.company} — {current.title}"
             if current
-            else (lock.get("job_id") or "a listing")
+            else (lock.get("job_id") or signal.get("job_id") or "a listing")
         )
-        if auto_submit_enabled():
-            st.success(f"Playwright is applying to **{current_label}**.")
-        else:
-            st.success(
-                f"Playwright is filling **{current_label}**. "
-                "The form will pause before Submit — review that browser window, then approve here."
-            )
+        st.success(f"Chromium is on **{current_label}**. Edit that window, then Submit.")
+        r1, r2, r3 = st.columns(3)
+        if r1.button("I submitted — sync & open next", type="primary", use_container_width=True):
+            set_review_action("submitted")
+            st.success("Told Playwright this one is submitted. Next role opens after the window closes.")
+            st.rerun()
+        if r2.button("Skip this role — open next", use_container_width=True):
+            set_review_action("skip")
+            st.info("Skipping this role. Next queued form will open.")
+            st.rerun()
+        if r3.button("Leave as prepped — open next", use_container_width=True):
+            set_review_action("next")
+            st.info("Keeping this row as ready for review. Next form will open.")
+            st.rerun()
     elif waiting_ids:
-        action = "auto-apply" if auto_submit_enabled() else "automatic Playwright prep"
-        st.info(f"{len(waiting_ids)} role(s) are queued for {action}.")
-        button_label = (
-            "Start auto-apply (fill + Submit)"
-            if auto_submit_enabled()
-            else "Start Playwright for queued roles"
-        )
-        if st.button(button_label, use_container_width=False):
+        st.info(f"{len(waiting_ids)} role(s) are queued. Only the first will open until you finish it.")
+        if st.button("Open the next application", use_container_width=False):
             st.info(request_auto_prep() or "Queue is already empty.")
             st.rerun()
 
     if not queue:
         st.info(
-            "Queue is empty. Start the monitor to discover $150k+ New Grad / Full Stack roles. "
-            "New matches are auto-prepped in Playwright and show up here for bulk review."
+            "Queue is empty. Start the monitor to discover $100k+ New Grad / Full Stack roles. "
+            "New matches are opened one at a time in Playwright so you can edit and Submit."
         )
         st.subheader("Playwright log")
         st.code(_tail_log(BOT_LOG_PATH), language="text")
@@ -348,8 +369,9 @@ def render_queue() -> None:
 
     filters = {
         "All active": None,
+        "Open in browser": {STATUS_REVIEWING, STATUS_PREPPING},
         "Ready for review": {STATUS_PREPPED},
-        "Queued / prepping": {STATUS_PENDING, STATUS_PREPPING},
+        "Queued": {STATUS_PENDING},
         "Submitted (not synced)": {STATUS_APPLIED},
         "Prep failed": {STATUS_FAILED},
     }
@@ -358,7 +380,7 @@ def render_queue() -> None:
     visible = [job for job in queue if wanted is None or job.fill_status in wanted]
 
     st.caption(
-        "Greenhouse, Lever, and Ashby matches are auto-applied when AUTO_SUBMIT=1. "
+        "Playwright opens one Greenhouse/Lever/Ashby form at a time and waits for you. "
         "Workday, TikTok, Amazon, Apple, Google, and similar portals are skipped "
         "(they need a login). Failed rows can be re-queued below."
     )
@@ -489,7 +511,7 @@ def render_queue() -> None:
     with st.expander("Advanced: re-queue selected for Playwright"):
         st.caption(
             "Only needed for failed preps or leftover pending rows. "
-            "New $150k+ matches are already auto-queued after each scrape."
+            "New matching roles are already auto-queued after each scrape."
         )
         if st.button("Send selected to Playwright", use_container_width=True):
             st.info(queue_for_playwright(selected_ids))
@@ -586,12 +608,15 @@ def main() -> None:
     _inject_css()
     profile = load_profile()
     name = f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
-    floor = int((profile.get("preferences") or {}).get("salary_floor") or 150000)
+    prefs = profile.get("preferences") or {}
+    floor = int(prefs.get("salary_floor") or 100000)
+    preferred = int(prefs.get("preferred_salary") or 150000)
 
     st.title("Autonomous Job Hunt Engine")
     st.caption(
-        f"{name} · New Grad / Full Stack SWE · ${floor:,.0f}+ floor · "
-        f"{local_now().strftime('%A %I:%M %p %Z')} · Playwright auto-applies Greenhouse/Lever/Ashby matches"
+        f"{name} · New Grad / Full Stack SWE · ${floor:,.0f}+ floor "
+        f"(prefer ${preferred:,.0f}) · "
+        f"{local_now().strftime('%A %I:%M %p %Z')} · One application at a time — edit, then Submit"
     )
 
     running = False

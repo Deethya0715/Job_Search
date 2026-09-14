@@ -5,9 +5,9 @@ Keeps the process running, scrapes hourly from 8:00 AM through 7:00 PM
 America/Chicago, keeps the 9:00 PM email scheduler armed, and writes a
 heartbeat to worker_status.json so the Streamlit dashboard can show live status.
 
-New $150k+ matches on Greenhouse, Lever, and Ashby are queued automatically.
-`discover()` launches `bot.py --auto-prep`, which fills forms and, when
-`AUTO_SUBMIT=1`, clicks Submit. Other career portals are skipped.
+New matching roles on Greenhouse, Lever, and Ashby are queued automatically.
+`discover()` launches `bot.py --auto-prep`, which fills one form at a time
+and waits for you to edit and Submit. Other career portals are skipped.
 """
 
 from __future__ import annotations

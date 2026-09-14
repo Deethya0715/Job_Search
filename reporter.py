@@ -55,7 +55,8 @@ def load_jobs_for_report(only_new: bool = True) -> list[JobPosting]:
 def build_markdown(jobs: list[JobPosting], profile: dict) -> str:
     now = datetime.now(LOCAL_TZ).strftime("%A, %B %d, %Y at %I:%M %p %Z")
     name = f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
-    floor = int((profile.get("preferences") or {}).get("salary_floor") or 150000)
+    floor = int((profile.get("preferences") or {}).get("salary_floor") or 100000)
+    preferred = int((profile.get("preferences") or {}).get("preferred_salary") or 150000)
     sources = Counter(job.source for job in jobs)
 
     lines = [
@@ -63,7 +64,7 @@ def build_markdown(jobs: list[JobPosting], profile: dict) -> str:
         "",
         f"Candidate: **{name}**  ",
         f"Target: New Grad / Full Stack Software Engineer  ",
-        f"Compensation floor: **${floor:,.0f}+**  ",
+        f"Compensation floor: **${floor:,.0f}+** (prefer **${preferred:,.0f}**)  ",
         f"Matches in this report: **{len(jobs)}**",
         "",
         "## Boards",
@@ -77,7 +78,7 @@ def build_markdown(jobs: list[JobPosting], profile: dict) -> str:
 
     lines += ["", "## Matches", ""]
     if not jobs:
-        lines.append("_The aggregator found no new $150k+ New Grad / Full Stack roles since the last run._")
+        lines.append("_The aggregator found no new $100k+ New Grad / Full Stack roles since the last run._")
         lines.append("")
         return "\n".join(lines)
 
@@ -145,9 +146,9 @@ def build_markdown(jobs: list[JobPosting], profile: dict) -> str:
         "---",
         "",
         "This report is a digest of the hunt. Greenhouse, Lever, and Ashby "
-        "matches are auto-applied when AUTO_SUBMIT=1 (`bot.py --auto-prep`). "
-        "Workday and other login portals stay skipped. Review the Streamlit "
-        "Application Queue (`streamlit run app.py`).",
+        "matches open one at a time in Playwright so you can edit and Submit "
+        "(`bot.py --auto-prep`). Workday and other login portals stay skipped. "
+        "Review the Streamlit Application Queue (`streamlit run app.py`).",
         "",
     ]
     return "\n".join(lines)

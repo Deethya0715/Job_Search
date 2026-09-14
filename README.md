@@ -2,7 +2,7 @@
 
 Production-style monitor for **high-paying New Grad / Full Stack Software Engineer** roles across **LinkedIn, Indeed, Glassdoor, ZipRecruiter, Google Jobs, Greenhouse, and Lever**.
 
-It scores postings against `profile.json` (Python, JavaScript, TypeScript, React, Next.js, Prisma, SQL, AI/ML, U.S. Provisional Patent), keeps a **$150k+** compensation floor, auto-applies on Greenhouse / Lever / Ashby via Playwright (`AUTO_SUBMIT=1`), syncs approved apps to [your Google Sheet](https://docs.google.com/spreadsheets/d/1TO5rtMymBoo64X2bld2R-HqBGlWim_m7kHNcHkICtxY/edit), and emails a digest at **9:00 PM America/Chicago**.
+It scores postings against `profile.json` (Python, JavaScript, TypeScript, React, Next.js, Prisma, SQL, AI/ML, U.S. Provisional Patent), keeps a **$100k+** compensation floor with **$150k preferred**, auto-applies on Greenhouse / Lever / Ashby via Playwright (`AUTO_SUBMIT=1`), syncs approved apps to [your Google Sheet](https://docs.google.com/spreadsheets/d/1TO5rtMymBoo64X2bld2R-HqBGlWim_m7kHNcHkICtxY/edit), and emails a digest at **9:00 PM America/Chicago**.
 
 Use this only for roles you intend to apply to, with your own information, and within each site's terms of use.
 
@@ -10,7 +10,7 @@ Use this only for roles you intend to apply to, with your own information, and w
 
 | Piece | File | Role |
 | --- | --- | --- |
-| Candidate profile | `profile.json` | Name, UTD CS (Dec 2026), U.S. citizenship, GitHub, skills, $150k floor |
+| Candidate profile | `profile.json` | Name, UTD CS (Dec 2026), U.S. citizenship, GitHub, skills, $100k floor / $150k preferred |
 | Universal scraper | `aggregator.py` | JobSpy + Greenhouse + Lever + Simplify, salary filter, resume score, auto-queue Playwright |
 | Form filler | `bot.py` | Playwright fills Greenhouse/Lever/Ashby; `AUTO_SUBMIT=1` clicks Submit |
 | Sheets tracker | `tracker_sync.py` | `gspread` append after you confirm a submission |
@@ -60,7 +60,8 @@ Replace placeholders before applying anywhere:
 | `work_authorization` | U.S. citizen, authorized, no sponsorship |
 | `resume_path` | `Deethyas_Resume.pdf` |
 | `skills` | Used for resume-similarity scoring |
-| `preferences.salary_floor` | `150000` |
+| `preferences.salary_floor` | `100000` (hard cutoff) |
+| `preferences.preferred_salary` | `150000` (ranked first) |
 
 ### 2. Email (`.env`)
 
@@ -117,7 +118,7 @@ streamlit run app.py
 
 The UI has four sections:
 
-1. **Live Monitor Status** — toggle the worker (hourly scrapes 8:00 AM–7:00 PM CT, email at 9:00 PM CT). New $150k+ matches are queued for Playwright automatically.
+1. **Live Monitor Status** — toggle the worker (hourly scrapes 8:00 AM–7:00 PM CT, email at 9:00 PM CT). New $100k+ matches are queued for Playwright automatically.
 2. **Discovered Jobs Feed** — scored listings, salaries, and links from every board.
 3. **Application Queue** — auto-prepped roles with live status. Review the paused Playwright window, click **Submit yourself**, then **Approve selected & sync** (or **Approve all ready for review**) to write Sheets rows. There is no per-job Prep button.
 4. **Tracker Sync Status** — rows that landed in Google Sheets, plus failures to retry.
@@ -135,11 +136,12 @@ python aggregator.py
 Sources:
 
 - **JobSpy** — LinkedIn, Indeed, Glassdoor, ZipRecruiter, Google Jobs
-- **Greenhouse / Lever** public board APIs (`ats_companies.json`)
+- **Greenhouse / Lever / Workday** public board APIs (`ats_companies.json`)
+- **USAJOBS** if `USAJOBS_API_KEY` is set
 - **SimplifyJobs** new-grad list
 - **JSearch** if `RAPIDAPI_KEY` is set
 
-A posting is kept only if it looks like New Grad SWE or Full Stack, is U.S./US-remote, meets the **$150k+** floor, and beats `preferences.min_match_score`.
+A posting is kept only if it looks like New Grad SWE or Full Stack, is U.S./US-remote, meets the **$100k+** floor, and beats `preferences.min_match_score`. Roles at **$150k+** are sorted first.
 
 Each **new** match is queued and handed to `bot.py --auto-prep` unless you pass `--no-auto-prep` or set `AUTO_PREP=0` in `.env`.
 
@@ -200,7 +202,7 @@ It will not invent essay answers or bypass CAPTCHAs. Set `AUTO_SUBMIT=0` if you 
 - **Resume not found** — put `Deethyas_Resume.pdf` in this folder.
 - **Browser does not open** — `python -m playwright install chromium`
 - **JobSpy / LinkedIn empty** — boards rate-limit. Retry later or use `--skip-jobspy`.
-- **No jobs pass $150k** — unlisted salaries are estimated only for known high-comp employers.
+- **No jobs pass $100k** — unlisted salaries are estimated only for known employers.
 - **Email fails** — App Password, `SMTP_USER`, and a real `REPORT_TO` / `profile.json` email.
 - **Sheets sync fails** — share the spreadsheet with the service account `client_email` as Editor; enable Sheets + Drive APIs.
 - **Wrong authorization answer** — change it during the review pause before you submit.
@@ -217,8 +219,8 @@ automated_job/
   reporter.py           Markdown + SMTP digest
   scheduler.py          9:00 PM trigger
   common.py             shared records and paths
-  profile.json          candidate + skills + $150k floor
-  ats_companies.json    Greenhouse + Lever board slugs
+  profile.json          candidate + skills + $100k floor / $150k preferred
+  ats_companies.json    Greenhouse + Lever + Workday board slugs
   matches.json          generated apply queue
   seen_jobs.json        generated de-dupe state
   prep_queue.json       generated Playwright auto-prep queue

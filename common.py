@@ -40,7 +40,8 @@ STOP_FLAG_PATH = ROOT / ".worker_stop"
 
 load_dotenv(ENV_PATH)
 
-DEFAULT_SALARY_FLOOR = 150_000
+DEFAULT_SALARY_FLOOR = 100_000
+DEFAULT_PREFERRED_SALARY = 150_000
 DEFAULT_MIN_MATCH_SCORE = 40.0
 try:
     LOCAL_TZ = ZoneInfo("America/Chicago")
@@ -180,6 +181,7 @@ def load_profile(path: Path = PROFILE_PATH) -> dict[str, Any]:
 
     prefs = profile.setdefault("preferences", {})
     prefs.setdefault("salary_floor", DEFAULT_SALARY_FLOOR)
+    prefs.setdefault("preferred_salary", DEFAULT_PREFERRED_SALARY)
     prefs.setdefault("min_match_score", DEFAULT_MIN_MATCH_SCORE)
     prefs.setdefault("country", "USA")
     prefs.setdefault("search_terms", ["Software Engineer New Grad", "Full Stack Engineer"])
@@ -697,7 +699,7 @@ def spawn_auto_prep_bot() -> str:
     queued = load_prep_queue_ids()
     action = "auto-apply" if auto_submit_enabled() else "auto-prep"
     message = (
-        f"Started Playwright {action} (pid {process.pid}) for {len(queued)} $150k+ role(s). "
+        f"Started Playwright {action} (pid {process.pid}) for {len(queued)} matching role(s). "
         + (
             "Forms are filled and submitted on Greenhouse/Lever/Ashby."
             if auto_submit_enabled()
