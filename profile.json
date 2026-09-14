@@ -4,6 +4,14 @@
   "full_name": "Deethya Janjanam",
   "email": "djanjanam@gmail.com",
   "phone": "469-591-8176",
+  "location": "Dallas, TX, United States",
+  "city": "Dallas",
+  "state": "Texas",
+  "languages": ["English", "Telugu"],
+  "offer_deadlines": {
+    "has_upcoming": true,
+    "through_month": "December"
+  },
   "graduation_date": "December 2026",
   "degree": "B.S. in Computer Science",
   "school": "The University of Texas at Dallas",

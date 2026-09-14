@@ -103,7 +103,48 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "expected graduation",
     ),
     "skills": ("skills", "technical skills", "key skills"),
+    "location": (
+        "current location",
+        "current city",
+        "where are you located",
+        "your location",
+        "city and state",
+    ),
+    "languages": (
+        "languages",
+        "language(s)",
+        "spoken language",
+        "languages spoken",
+    ),
 }
+
+OFFER_DEADLINE_LABELS = (
+    "offer deadline",
+    "upcoming offer",
+    "anticipate any upcoming",
+    "offer deadlines",
+)
+
+MONTH_INDEX = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
+MONTH_RANGE_RE = re.compile(
+    r"(january|february|march|april|may|june|july|august|september|october|november|december)"
+    r"\s+\d{1,2}\s*[-–]\s*"
+    r"(january|february|march|april|may|june|july|august|september|october|november|december)",
+    re.I,
+)
 
 AUTH_YES_LABELS = (
     "authorized to work",
@@ -692,6 +733,19 @@ def fill_common_identity(page: Target, profile: dict[str, Any]) -> None:
         github,
     ) or fill_by_aliases(page, FIELD_ALIASES["github"], github)
 
+    location = usable_profile_value(profile.get("location", ""))
+    try_fill_selectors(
+        page,
+        [
+            "input[name*='location' i]",
+            "input[id*='location' i]",
+            "input[placeholder*='location' i]",
+            "input[placeholder*='city' i]",
+            "input[autocomplete='address-level2']",
+        ],
+        location,
+    ) or fill_by_aliases(page, FIELD_ALIASES["location"], location)
+
 
 def fill_education(page: Target, profile: dict[str, Any]) -> None:
     fill_by_aliases(page, FIELD_ALIASES["school"], profile.get("school", ""))
@@ -706,6 +760,74 @@ def fill_skills(page: Target, profile: dict[str, Any]) -> None:
     if not skills:
         return
     fill_by_aliases(page, FIELD_ALIASES["skills"], ", ".join(str(item) for item in skills))
+
+
+def fill_languages(page: Target, profile: dict[str, Any]) -> None:
+    languages = profile.get("languages") or []
+    if not languages:
+        return
+    value = ", ".join(str(item) for item in languages)
+    fill_by_aliases(page, FIELD_ALIASES["languages"], value)
+
+
+def _through_month_index(profile: dict[str, Any]) -> int:
+    raw = str((profile.get("offer_deadlines") or {}).get("through_month") or "December")
+    return MONTH_INDEX.get(raw.strip().lower(), 12)
+
+
+def _window_is_through_month(label: str, through: int) -> bool:
+    match = MONTH_RANGE_RE.search(label or "")
+    if not match:
+        return False
+    start = MONTH_INDEX[match.group(1).lower()]
+    # Recruiting calendars often wrap into January; "until December" excludes that.
+    if start == 1 and through >= 8:
+        return False
+    return start <= through
+
+
+def check_deadline_windows(page: Target, through: int) -> int:
+    checked = 0
+    labels = page.locator("label")
+    try:
+        total = min(labels.count(), 120)
+    except Exception:
+        return 0
+    for index in range(total):
+        label = labels.nth(index)
+        try:
+            if not label.is_visible():
+                continue
+            text = " ".join((label.inner_text() or "").split())
+        except Exception:
+            continue
+        if not _window_is_through_month(text, through):
+            continue
+        try:
+            for_id = label.get_attribute("for")
+            control = page.locator(f"#{for_id}") if for_id else label
+            if control.count() and control.first.is_checked():
+                continue
+            label.click(timeout=2_000)
+            checked += 1
+            print(f"  checked deadline window {text!r}")
+        except Exception:
+            continue
+    return checked
+
+
+def fill_offer_deadlines(page: Target, profile: dict[str, Any]) -> None:
+    deadlines = profile.get("offer_deadlines") or {}
+    if not deadlines:
+        return
+    has_upcoming = bool(deadlines.get("has_upcoming"))
+    hits = answer_yes_no_question(
+        page, OFFER_DEADLINE_LABELS, "yes" if has_upcoming else "no"
+    )
+    windows = 0
+    if has_upcoming:
+        windows = check_deadline_windows(page, _through_month_index(profile))
+    print(f"  offer-deadline answers: {hits}, date windows checked: {windows}")
 
 
 def fill_work_authorization(page: Target, profile: dict[str, Any]) -> None:
@@ -742,9 +864,17 @@ def fill_application(page: Page, profile: dict[str, Any]) -> None:
     for root in roots:
         fill_skills(root, profile)
 
+    print("[*] Filling languages (best effort)...")
+    for root in roots:
+        fill_languages(root, profile)
+
     print("[*] Answering work-authorization questions (best effort)...")
     for root in roots:
         fill_work_authorization(root, profile)
+
+    print("[*] Answering offer-deadline questions (best effort)...")
+    for root in roots:
+        fill_offer_deadlines(root, profile)
 
 
 def fill_greenhouse(page: Page, profile: dict[str, Any]) -> None:
