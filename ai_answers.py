@@ -1,6 +1,6 @@
 """LLM answers for leftover application questions.
 
-Uses OpenAI, Anthropic, or Gemini if a key is present. Never invents
+Uses Gemini if GEMINI_API_KEY is set. Never invents
 work-authorization, citizenship, or employers that contradict profile.json.
 """
 
@@ -21,7 +21,7 @@ _TIMEOUT = 45
 
 
 def llm_configured() -> bool:
-    return bool(env("OPENAI_API_KEY") or env("ANTHROPIC_API_KEY") or env("GEMINI_API_KEY"))
+    return bool(env("GEMINI_API_KEY"))
 
 
 def ai_answers_enabled() -> bool:
@@ -133,55 +133,6 @@ def _parse_json_object(text: str) -> dict[str, Any]:
             return {}
 
 
-def _openai_complete(system: str, user: str) -> str:
-    key = env("OPENAI_API_KEY")
-    if not key:
-        return ""
-    model = env("OPENAI_MODEL", "gpt-4o-mini")
-    response = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={
-            "model": model,
-            "temperature": 0.35,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        },
-        timeout=_TIMEOUT,
-    )
-    response.raise_for_status()
-    return str(response.json()["choices"][0]["message"]["content"] or "")
-
-
-def _anthropic_complete(system: str, user: str) -> str:
-    key = env("ANTHROPIC_API_KEY")
-    if not key:
-        return ""
-    model = env("ANTHROPIC_MODEL", "claude-sonnet-4-5")
-    response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": model,
-            "max_tokens": 2500,
-            "temperature": 0.35,
-            "system": system,
-            "messages": [{"role": "user", "content": user}],
-        },
-        timeout=_TIMEOUT,
-    )
-    response.raise_for_status()
-    parts = response.json().get("content") or []
-    return "".join(str(part.get("text") or "") for part in parts if isinstance(part, dict))
-
-
 def _gemini_complete(system: str, user: str) -> str:
     key = env("GEMINI_API_KEY")
     if not key:
@@ -210,22 +161,12 @@ def _gemini_complete(system: str, user: str) -> str:
 
 
 def _complete(system: str, user: str) -> str:
-    errors: list[str] = []
-    for name, fn in (
-        ("openai", _openai_complete),
-        ("anthropic", _anthropic_complete),
-        ("gemini", _gemini_complete),
-    ):
-        try:
-            text = fn(system, user)
-        except Exception as exc:
-            errors.append(f"{name}: {exc}")
-            continue
-        if text.strip():
-            return text
-    if errors:
-        raise RuntimeError("; ".join(errors[:3]))
-    raise RuntimeError("No LLM API key is set.")
+    if not env("GEMINI_API_KEY"):
+        raise RuntimeError("No GEMINI_API_KEY is set.")
+    text = _gemini_complete(system, user)
+    if not text.strip():
+        raise RuntimeError("Gemini returned an empty response.")
+    return text
 
 
 def answer_questions(

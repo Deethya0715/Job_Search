@@ -439,7 +439,7 @@ def ai_answers_enabled() -> bool:
     raw = env("AI_ANSWERS", "1").lower()
     if raw in {"0", "false", "no", "off"}:
         return False
-    return bool(env("OPENAI_API_KEY") or env("ANTHROPIC_API_KEY") or env("GEMINI_API_KEY"))
+    return bool(env("GEMINI_API_KEY"))
 
 
 def scrape_interval_minutes() -> int:

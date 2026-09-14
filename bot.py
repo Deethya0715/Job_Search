@@ -3564,7 +3564,7 @@ def main() -> None:
     if auto_submit_enabled() and not ai_answers_enabled():
         bot_notify(
             "[warn] No LLM API key in .env. Leftover essays use answers.json only. "
-            "Set OPENAI_API_KEY (or ANTHROPIC_API_KEY / GEMINI_API_KEY) for AI answers."
+            "Set GEMINI_API_KEY for AI answers."
         )
 
     with sync_playwright() as playwright:

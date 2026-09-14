@@ -334,7 +334,7 @@ def render_queue() -> None:
         )
         if not ai_answers_enabled():
             st.warning(
-                "No LLM API key yet. Set `OPENAI_API_KEY` (or Anthropic/Gemini) in `.env` "
+                "No LLM API key yet. Set `GEMINI_API_KEY` in `.env` "
                 "so leftover essays and cover letters are written automatically. "
                 "Cover letters still use a template if no key is set."
             )
@@ -686,7 +686,7 @@ def main() -> None:
     if not service_account_path().is_file():
         warn_bits.append("Add `credentials.json` and share the Google Sheet with the service account.")
     if auto_submit_enabled() and not ai_answers_enabled():
-        warn_bits.append("Add OPENAI_API_KEY (or Anthropic/Gemini) in `.env` so leftover questions get AI answers.")
+        warn_bits.append("Add GEMINI_API_KEY in `.env` so leftover questions get AI answers.")
     if warn_bits:
         st.warning("Setup remaining: " + " ".join(warn_bits))
 
