@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
@@ -442,3 +444,6 @@ def main() -> None:
         warn_bits.append("Add `credentials.json` and share the Google Sheet with the service account.")
     if warn_bits:
         st.warning("Setup remaining: " + " ".join(warn_bits))
+
+
+main()
