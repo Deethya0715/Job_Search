@@ -5,8 +5,9 @@ Pulls Software Engineer New Grad / Full Stack listings from LinkedIn, Indeed,
 Glassdoor, ZipRecruiter, Google Jobs (via python-jobspy), Greenhouse, Lever,
 an optional JSearch API, and the public Simplify new-grad list.
 
-Applies a $150k compensation floor, scores each posting against profile.json,
-and writes new matches to matches.json while de-duplicating via seen_jobs.json.
+Applies a strict U.S.-only location filter, a $150k compensation floor, scores
+each posting against profile.json, and writes new matches to matches.json
+while de-duplicating via seen_jobs.json.
 """
 
 from __future__ import annotations
@@ -66,21 +67,82 @@ NEW_GRAD_RE = re.compile(
     re.I,
 )
 FULL_STACK_RE = re.compile(r"\bfull[\s-]?stack|fullstack\b", re.I)
+# International countries, regions, and cities. Unknown foreign cities (e.g.
+# Bucharest) are still dropped because the filter is allowlist-based.
 NON_US_RE = re.compile(
-    r"\b(india|bangalore|hyderabad|bengaluru|united kingdom|\buk\b|uk only|"
-    r"europe|emea|canada only|toronto|vancouver,?\s*bc|dublin|"
-    r"germany|france|netherlands|singapore|london|sydney|melbourne|"
-    r"barcelona|madrid|spain|berlin|munich|amsterdam|paris|zurich|"
-    r"tel aviv|tokyo|seoul|hong kong|dublin|poland|warsaw|stockholm)\b",
+    r"\b("
+    r"india|bangalore|bengaluru|hyderabad|pune|mumbai|chennai|delhi|"
+    r"noida|gurgaon|gurugram|united kingdom|\buk\b|england|scotland|wales|"
+    r"uk only|europe|emea|apac|latam|eu only|"
+    r"canada|canadian|toronto|montreal|ottawa|calgary|edmonton|waterloo|"
+    r"mississauga|burnaby|ontario|british columbia|vancouver,?\s*bc|"
+    r"ireland|dublin|germany|france|netherlands|spain|italy|romania|"
+    r"bucharest|poland|warsaw|sweden|stockholm|switzerland|zurich|"
+    r"israel|tel aviv|singapore|australia|sydney|melbourne|"
+    r"london|edinburgh|manchester|oxford|bristol|"
+    r"barcelona|madrid|berlin|munich|amsterdam|paris|"
+    r"tokyo|seoul|hong kong|mexico|brazil|sao paulo|argentina|"
+    r"china|shanghai|beijing|shenzhen|hangzhou|taiwan|taipei|"
+    r"vietnam|philippines|indonesia|malaysia|thailand|"
+    r"new zealand|south africa|uae|dubai"
+    r")\b",
     re.I,
 )
-US_HINT_RE = re.compile(
-    r"\b(united states|\busa\b|\bus\b|u\.s\.|remote[\s-]*us|us[\s-]*remote|"
-    r"new york|nyc|san francisco|bay area|seattle|austin|dallas|chicago|"
-    r"boston|california|texas|washington|colorado|georgia|florida|"
-    r"massachusetts|illinois|seattle|redmond|bellevue|mountain view|"
-    r"palo alto|sunnyvale|cupertino|los angeles|miami|atlanta|denver|"
-    r"portland|phoenix|raleigh|charlotte|nashville|minneapolis)\b",
+US_COUNTRY_RE = re.compile(
+    r"\b(united states|usa|u\.s\.a\.|u\.s\.)\b",
+    re.I,
+)
+US_REMOTE_RE = re.compile(
+    r"\b("
+    r"remote[\s\-]*(?:\(|\[)?\s*(?:us|usa|u\.s\.a?\.?|united states)"
+    r"|(?:us|usa|u\.s\.|united states)[\s\-]*remote"
+    r"|united states\s*\(?\s*remote"
+    r")\b",
+    re.I,
+)
+US_STATE_NAMES = (
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+    "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
+    "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
+    "maine", "maryland", "massachusetts", "michigan", "minnesota",
+    "mississippi", "missouri", "montana", "nebraska", "nevada",
+    "new hampshire", "new jersey", "new mexico", "new york",
+    "north carolina", "north dakota", "ohio", "oklahoma", "oregon",
+    "pennsylvania", "rhode island", "south carolina", "south dakota",
+    "tennessee", "texas", "utah", "vermont", "virginia", "washington",
+    "west virginia", "wisconsin", "wyoming", "district of columbia",
+)
+US_STATE_NAME_RE = re.compile(
+    r"\b(" + "|".join(re.escape(name) for name in US_STATE_NAMES) + r")\b",
+    re.I,
+)
+# Match "Austin, TX" / "WA" location tokens, not the word "in" or "or".
+US_STATE_ABBREV_RE = re.compile(
+    r"(?:^|,\s*|[•|/|\-]\s*|\s)("
+    r"AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|IA|ID|IL|IN|KS|KY|LA|MA|MD|ME|"
+    r"MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|"
+    r"UT|VA|VT|WA|WI|WV|WY"
+    r")\b",
+    re.I,
+)
+US_CITY_RE = re.compile(
+    r"\b("
+    r"nyc|n\.y\.c|new york city|san francisco|sf|bay area|"
+    r"los angeles|la|seattle|austin|dallas|chicago|boston|"
+    r"redmond|bellevue|mountain view|palo alto|sunnyvale|cupertino|"
+    r"san jose|san diego|san mateo|santa clara|santa monica|menlo park|"
+    r"irvine|atlanta|miami|denver|portland|phoenix|raleigh|charlotte|"
+    r"nashville|minneapolis|philadelphia|pittsburgh|houston|"
+    r"washington(?:\s*,?\s*d\.?c\.?)?|arlington|reston|mclean|"
+    r"annapolis junction|fort collins|broomfield|newport beach|"
+    r"costa mesa|culver city|kirkland|san bruno|wakefield|westborough|"
+    r"springfield|orlando|greenwich|lafayette|indianapolis|madison|"
+    r"durham|northridge|brooklyn|manhattan|queens"
+    r")\b",
+    re.I,
+)
+GENERIC_REMOTE_RE = re.compile(
+    r"^(remote(?:[\s\-]*(?:usa?|united states|only|hybrid))?|anywhere(?: in the united states)?)$",
     re.I,
 )
 SALARY_RANGE_RE = re.compile(
@@ -228,19 +290,42 @@ def excluded_by_title(title: str, exclude_keywords: list[str]) -> bool:
     )
 
 
-def is_us_role(location: str, description: str, url: str = "", title: str = "") -> bool:
-    loc = location or ""
-    if NON_US_RE.search(loc) and not US_HINT_RE.search(loc):
-        return False
-    blob = f"{location} {url} {title}"
-    if NON_US_RE.search(blob) and not US_HINT_RE.search(blob):
-        return False
-    loc_norm = _norm(location)
-    if not loc_norm or loc_norm in {"remote", "united states", "usa", "us", "anywhere"}:
+def _has_strong_us_location(location: str) -> bool:
+    return bool(
+        US_COUNTRY_RE.search(location)
+        or US_REMOTE_RE.search(location)
+        or US_STATE_NAME_RE.search(location)
+        or US_CITY_RE.search(location)
+    )
+
+
+def is_us_role(location: str, description: str = "", url: str = "", title: str = "") -> bool:
+    """Keep a posting only when its location field is U.S. (or Remote (US)).
+
+    The location string is the sole signal: URL/title/description are ignored
+    so a Stripe jobs URL cannot rescue Barcelona, and a foreign city with no
+    U.S. office (Bucharest, London, Singapore) is discarded.
+    Mixed multi-office strings that include a U.S. city or state are kept.
+    """
+    loc = _norm(location)
+    if not loc:
         return True
-    if "remote" in loc_norm and NON_US_RE.search(loc_norm) and not US_HINT_RE.search(loc_norm):
-        return False
-    return True
+    if loc in {"us", "usa", "u.s.", "u.s.a.", "united states"}:
+        return True
+    if GENERIC_REMOTE_RE.search(loc) and not NON_US_RE.search(loc):
+        return True
+    if US_REMOTE_RE.search(loc):
+        return True
+
+    non_us = bool(NON_US_RE.search(loc))
+    strong_us = _has_strong_us_location(loc)
+    state_abbrev = bool(US_STATE_ABBREV_RE.search(location or ""))
+
+    # "Bangalore, IN" must not count Indiana; require a real U.S. place name
+    # whenever a foreign country/city is present.
+    if non_us:
+        return strong_us
+    return strong_us or state_abbrev
 
 
 def _to_annual(amount: float, interval: str | None) -> int:
@@ -777,10 +862,13 @@ def filter_and_score(
     exclude = [str(word).lower() for word in prefs.get("exclude_title_keywords") or []]
 
     kept: list[JobPosting] = []
+    skipped_non_us = 0
     for job in jobs:
         if excluded_by_title(job.title, exclude):
             continue
         if not is_us_role(job.location, job.description, job.url, job.title):
+            skipped_non_us += 1
+            log.debug("Dropping non-U.S. location %r (%s — %s)", job.location, job.company, job.title)
             continue
 
         swe_ok = bool(SWE_TITLE_RE.search(job.title))
@@ -808,6 +896,8 @@ def filter_and_score(
             job.first_seen = utc_now()
         kept.append(job)
 
+    if skipped_non_us:
+        log.info("Discarded %s postings outside the United States.", skipped_non_us)
     kept.sort(key=lambda item: (-item.match_score, item.company.lower(), item.title.lower()))
     return kept
 
@@ -839,10 +929,14 @@ def persist_matches(new_jobs: list[JobPosting], seen: dict[str, Any]) -> list[Jo
     queued: dict[str, dict[str, Any]] = {}
     # Keep prior queue rows (pending / prepped / applied / synced) so the
     # dashboard and Google Sheets workflow are not wiped on each scrape.
+    # Re-apply the U.S. location filter so international leftovers are dropped.
     for raw in previous.get("jobs") or []:
         job_id = raw.get("id")
-        if job_id:
-            queued[job_id] = raw
+        if not job_id:
+            continue
+        if not is_us_role(str(raw.get("location") or "")):
+            continue
+        queued[job_id] = raw
     for job in reversed(fresh):
         prior = queued.get(job.id) or {}
         row = job.to_dict()
@@ -864,6 +958,21 @@ def persist_matches(new_jobs: list[JobPosting], seen: dict[str, Any]) -> list[Jo
     }
     save_json(MATCHES_PATH, payload)
     return fresh
+
+
+def prune_non_us_matches() -> tuple[int, int]:
+    """Drop non-U.S. roles from matches.json without running a scrape."""
+    previous = load_json(MATCHES_PATH, {"jobs": []})
+    jobs = list(previous.get("jobs") or [])
+    kept = [row for row in jobs if is_us_role(str(row.get("location") or ""))]
+    dropped = len(jobs) - len(kept)
+    previous["jobs"] = kept
+    previous["queue_count"] = len(kept)
+    previous["generated_at"] = utc_now()
+    previous["new_count"] = 0
+    save_json(MATCHES_PATH, previous)
+    log.info("Pruned matches.json: removed %s non-U.S. roles, %s remain.", dropped, len(kept))
+    return len(kept), dropped
 
 
 def discover(
@@ -911,6 +1020,11 @@ def parse_args() -> argparse.Namespace:
         help="Skip LinkedIn/Indeed/Glassdoor/ZipRecruiter/Google (ATS + Simplify only).",
     )
     parser.add_argument(
+        "--prune-non-us",
+        action="store_true",
+        help="Drop non-U.S. locations from matches.json and exit (no scrape).",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -925,6 +1039,11 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S",
     )
+    if args.prune_non_us:
+        kept, dropped = prune_non_us_matches()
+        print(f"[aggregator] Pruned matches.json: removed {dropped} non-U.S. roles, {kept} remain.")
+        return
+
     profile = load_profile()
     email = profile.get("email", "")
     if "YOUR_EMAIL" in email or "example.com" in email:
