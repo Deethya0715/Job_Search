@@ -1,9 +1,9 @@
 """
 24/7 background engine.
 
-Runs the multi-board aggregator on a timer, keeps the 9:00 PM America/Chicago
-email scheduler armed, and writes a heartbeat to worker_status.json so the
-Streamlit dashboard can show live status.
+Keeps the process running, scrapes hourly from 8:00 AM through 7:00 PM
+America/Chicago, keeps the 9:00 PM email scheduler armed, and writes a
+heartbeat to worker_status.json so the Streamlit dashboard can show live status.
 
 New $150k+ matches on Greenhouse, Lever, and Ashby are queued automatically.
 `discover()` launches `bot.py --auto-prep`, which fills forms and, when
@@ -18,11 +18,13 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta
 
 import schedule
 
 from aggregator import discover
 from common import (
+    LOCAL_TZ,
     ROOT,
     STOP_FLAG_PATH,
     WORKER_LOG_PATH,
@@ -37,13 +39,54 @@ from scheduler import REPORT_TIME, run_pipeline
 
 log = logging.getLogger("worker")
 
+DEFAULT_SCRAPE_START_HOUR = 8
+DEFAULT_SCRAPE_END_HOUR = 19
 
-def _interval_minutes() -> int:
-    raw = env("WORKER_INTERVAL_MINUTES", "45")
+
+def _scrape_hours() -> tuple[int, int]:
+    """Inclusive clock hours for scrapes (default 8 AM through 7 PM CT)."""
     try:
-        return max(10, int(raw))
+        start = int(env("SCRAPE_HOURS_START", str(DEFAULT_SCRAPE_START_HOUR)))
+        end = int(env("SCRAPE_HOURS_END", str(DEFAULT_SCRAPE_END_HOUR)))
     except ValueError:
-        return 45
+        return DEFAULT_SCRAPE_START_HOUR, DEFAULT_SCRAPE_END_HOUR
+    start = max(0, min(23, start))
+    end = max(0, min(23, end))
+    if end < start:
+        return DEFAULT_SCRAPE_START_HOUR, DEFAULT_SCRAPE_END_HOUR
+    return start, end
+
+
+def _format_clock_hour(hour: int) -> str:
+    suffix = "AM" if hour < 12 else "PM"
+    display = hour % 12 or 12
+    return f"{display}:00 {suffix}"
+
+
+def _window_label() -> str:
+    start, end = _scrape_hours()
+    return f"{_format_clock_hour(start)} to {_format_clock_hour(end)} CT"
+
+
+def in_scrape_window(now: datetime | None = None) -> bool:
+    now = now or datetime.now(LOCAL_TZ)
+    start, end = _scrape_hours()
+    return start <= now.hour <= end
+
+
+def next_scrape_at(now: datetime | None = None) -> datetime:
+    now = now or datetime.now(LOCAL_TZ)
+    start, end = _scrape_hours()
+    cursor = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    for _ in range(36):
+        if start <= cursor.hour <= end:
+            return cursor
+        cursor += timedelta(hours=1)
+    return cursor
+
+
+def _next_scrape_label(now: datetime | None = None) -> str:
+    return next_scrape_at(now).strftime("%Y-%m-%d %I:%M %p %Z")
 
 
 def _clear_stop_flag() -> None:
@@ -157,6 +200,7 @@ def scrape_only() -> int:
             last_scrape_at=utc_now(),
             last_scrape_new=len(fresh),
             last_scrape_error="",
+            next_scrape_at=_next_scrape_label(),
             message=f"Last scrape found {len(fresh)} new matching role(s).",
         )
         log.info("Scrape finished: %s new matches.", len(fresh))
@@ -168,6 +212,7 @@ def scrape_only() -> int:
             pid=os.getpid(),
             last_scrape_at=utc_now(),
             last_scrape_error=str(exc),
+            next_scrape_at=_next_scrape_label(),
             message=f"Scrape failed: {exc}",
         )
         return 0
@@ -198,30 +243,45 @@ def nightly_report() -> None:
         )
 
 
+def _armed_message(report_at: str) -> str:
+    return (
+        f"Armed. Scrapes hourly {_window_label()}; "
+        f"next scrape {_next_scrape_label()}; report at {report_at} CT."
+    )
+
+
 def loop(report_at: str, run_immediately: bool) -> None:
-    interval = _interval_minutes()
+    start_hour, end_hour = _scrape_hours()
     _clear_stop_flag()
     save_worker_status(
         state="running",
         pid=os.getpid(),
         started_at=utc_now(),
         next_report_at=f"{report_at} America/Chicago",
-        message=f"Armed. Scraping every {interval} min; report at {report_at} CT.",
+        next_scrape_at=_next_scrape_label(),
+        message=_armed_message(report_at),
         last_scrape_error="",
     )
     log.info(
-        "Worker pid=%s interval=%s min report=%s America/Chicago",
+        "Worker pid=%s hourly %s report=%s America/Chicago",
         os.getpid(),
-        interval,
+        _window_label(),
         report_at,
     )
 
     schedule.clear()
-    schedule.every().day.at(report_at).do(nightly_report)
-    schedule.every(interval).minutes.do(scrape_only)
+    schedule.every().day.at(report_at, "America/Chicago").do(nightly_report)
+    for hour in range(start_hour, end_hour + 1):
+        schedule.every().day.at(f"{hour:02d}:00", "America/Chicago").do(scrape_only)
 
-    if run_immediately:
+    if run_immediately and in_scrape_window():
         scrape_only()
+    elif run_immediately:
+        log.info(
+            "Outside scrape window (%s); waiting until %s.",
+            _window_label(),
+            _next_scrape_label(),
+        )
 
     while not stop_requested():
         schedule.run_pending()
@@ -229,6 +289,7 @@ def loop(report_at: str, run_immediately: bool) -> None:
             state="running",
             pid=os.getpid(),
             next_report_at=f"{report_at} America/Chicago",
+            next_scrape_at=_next_scrape_label(),
         )
         time.sleep(2)
 

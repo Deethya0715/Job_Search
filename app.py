@@ -2,7 +2,7 @@
 Streamlit control plane for the job-hunting engine.
 
 Tabs:
-  1. Live Monitor Status  — start/stop the 24/7 worker
+  1. Live Monitor Status  — start/stop the hourly worker
   2. Discovered Jobs Feed — scored listings from every board
   3. Application Queue    — auto-prepped roles waiting for bulk review
   4. Tracker Sync Status  — rows pushed to Google Sheets
@@ -184,7 +184,7 @@ def render_monitor() -> None:
         running = worker_is_running()
     except Exception as exc:
         st.error(f"Worker module could not load in this environment: {exc}")
-        st.info("The queue and tracker still work. Run the 24/7 monitor on your local machine.")
+        st.info("The queue and tracker still work. Run the monitor on your local machine.")
         return
     if status.get("state") == "running" and not running:
         status["state"] = "stopped"
@@ -196,15 +196,20 @@ def render_monitor() -> None:
         else '<span class="status-pill status-off">STOPPED</span>'
     )
     st.markdown(f"### Engine {pill}", unsafe_allow_html=True)
-    st.caption(status.get("message") or "")
+    st.caption(
+        status.get("message")
+        or "Scrapes hourly from 8:00 AM to 7:00 PM CT. Email digest at 9:00 PM CT."
+    )
 
     left, right = st.columns([1, 2])
     with left:
-        wanted = st.toggle("Run 24/7 monitor", value=running)
+        wanted = st.toggle("Run monitor", value=running)
         if wanted and not running:
             try:
                 pid = start_worker_process(initial_scrape=True)
-                st.success(f"Worker started (pid {pid}). First scrape is in progress.")
+                st.success(
+                    f"Worker started (pid {pid}). Scrapes hourly 8:00 AM–7:00 PM CT."
+                )
                 st.rerun()
             except Exception as exc:
                 st.error(f"Could not start worker: {exc}")
@@ -240,6 +245,7 @@ def render_monitor() -> None:
                 "Heartbeat": status.get("last_heartbeat") or "—",
                 "Last scrape": status.get("last_scrape_at") or "—",
                 "New last scrape": status.get("last_scrape_new"),
+                "Next scrape": status.get("next_scrape_at") or "—",
                 "Nightly report": status.get("next_report_at"),
                 "Last report": status.get("last_report_at") or "—",
             }

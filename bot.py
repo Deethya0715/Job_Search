@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -34,24 +35,28 @@ from common import (
     STATUS_PENDING,
     STATUS_PREPPED,
     STATUS_PREPPING,
+    STATUS_REVIEWING,
     STATUS_SKIPPED,
     STATUS_SYNCED,
     JobPosting,
     auto_submit_enabled,
     bot_notify,
     clear_bot_lock,
+    clear_review_signal,
     enqueue_for_prep,
     find_match,
     is_automatable_apply_url,
     load_json,
     load_match_jobs,
     load_profile,
+    load_review_signal,
     playwright_headless,
     resume_path_or_exit,
-    take_prep_batch,
+    take_prep_one,
     update_match_status,
     utc_now,
     write_bot_lock,
+    write_review_signal,
 )
 
 Target = Page | Frame
@@ -69,7 +74,8 @@ SUBMIT_TEXT_DENYLIST = (
 )
 
 APPLY_OPEN_PATTERN = re.compile(
-    r"^(apply|apply now|apply for this job|start application|begin application|i.?m interested)$",
+    r"^(apply|apply now|apply for this job|apply to this job|start application|"
+    r"begin application|i.?m interested)$",
     re.I,
 )
 SUBMIT_PATTERN = re.compile(
@@ -224,6 +230,15 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "other language",
         "language proficiency",
         "linguistic",
+    ),
+    "start_date": (
+        "start date",
+        "available to start",
+        "when can you start",
+        "earliest start",
+        "when would you be available",
+        "availability date",
+        "date available",
     ),
 }
 
@@ -450,6 +465,19 @@ def open_application_form(page: Page) -> None:
         except PlaywrightTimeoutError:
             pass
         time.sleep(0.6)
+    if not form_fields_present(page):
+        for selector in (
+            "#apply_button",
+            "a#apply_button",
+            "a[href*='apply']",
+            "a.postings-btn",
+            ".application-form a.button",
+        ):
+            candidate = first_visible(visible_locator(page, selector))
+            if candidate and _click_locator(candidate):
+                print(f"[*] Clicked Apply via {selector}.")
+                time.sleep(0.8)
+                break
     try:
         page.wait_for_selector(
             "iframe#grnhse_iframe, iframe[id*='grnhse'], iframe[src*='greenhouse'], "
@@ -459,7 +487,7 @@ def open_application_form(page: Page) -> None:
         )
     except PlaywrightTimeoutError:
         pass
-    for _ in range(8):
+    for _ in range(10):
         if form_fields_present(page):
             return
         time.sleep(0.7)
@@ -732,6 +760,16 @@ def first_visible(locator: Locator) -> Locator | None:
     return None
 
 
+def _current_value(locator: Locator) -> str:
+    try:
+        return (locator.input_value(timeout=1_000) or "").strip()
+    except Exception:
+        try:
+            return (locator.inner_text(timeout=800) or "").strip()
+        except Exception:
+            return ""
+
+
 def fill_if_empty(locator: Locator, value: str) -> bool:
     """Type into an input only when it is visible and currently blank."""
     if not value:
@@ -739,14 +777,39 @@ def fill_if_empty(locator: Locator, value: str) -> bool:
     try:
         if not locator.is_visible():
             return False
-        current = (locator.input_value(timeout=1_500) or "").strip()
-        if current:
-            return False
-        locator.scroll_into_view_if_needed()
-        locator.fill(value)
-        return True
     except Exception:
         return False
+    if _current_value(locator):
+        return False
+    try:
+        locator.scroll_into_view_if_needed()
+    except Exception:
+        pass
+    try:
+        locator.click(timeout=2_000)
+    except Exception:
+        pass
+    try:
+        locator.fill(value, timeout=3_000)
+        return True
+    except Exception:
+        try:
+            locator.press_sequentially(value, delay=12)
+            return True
+        except Exception:
+            try:
+                locator.evaluate(
+                    """(el, v) => {
+                        el.focus();
+                        el.value = v;
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }""",
+                    value,
+                )
+                return True
+            except Exception:
+                return False
 
 
 def try_fill_selectors(page: Target, selectors: list[str], value: str) -> bool:
@@ -812,13 +875,15 @@ def fill_by_aliases(page: Target, aliases: tuple[str, ...], value: str) -> bool:
         return False
 
     controls = page.locator(
-        "input:not([type='hidden']):not([type='file']):not([type='submit']):not([type='button']), textarea"
+        "input:not([type='hidden']):not([type='file']):not([type='submit']):not([type='button']), "
+        "textarea, [contenteditable='true']"
     )
     try:
-        total = controls.count()
+        total = min(controls.count(), 120)
     except PlaywrightTimeoutError:
         return False
 
+    filled = False
     for index in range(total):
         control = controls.nth(index)
         try:
@@ -830,8 +895,8 @@ def fill_by_aliases(page: Target, aliases: tuple[str, ...], value: str) -> bool:
         blob = f"{attr_blob(control)} {associated_label_text(page, control)}"
         if looks_like(blob, aliases) and fill_if_empty(control, value):
             print(f"  filled field matching {aliases[0]!r}")
-            return True
-    return False
+            filled = True
+    return filled
 
 
 LOCATION_SKIP_BITS = (
@@ -1006,6 +1071,7 @@ def upload_resume(page: Target, resume_path: str) -> bool:
                 continue
             file_input.set_input_files(resume_path)
             print(f"  uploaded resume -> {resume_path}")
+            time.sleep(1.6)
             return True
         except Exception:
             continue
@@ -1020,6 +1086,7 @@ def upload_resume(page: Target, resume_path: str) -> bool:
                 attach.click()
             chooser_info.value.set_files(resume_path)
             print("  uploaded resume via file chooser")
+            time.sleep(1.6)
             return True
         except Exception:
             pass
@@ -1104,11 +1171,33 @@ def pick_dropdown_value(page: Target, control: Locator, tokens: tuple[str, ...])
     return False
 
 
+def _choice_matches(text: str, wanted: tuple[str, ...]) -> bool:
+    blob = " ".join((text or "").lower().split())
+    if not blob:
+        return False
+    first = re.split(r"[^a-z0-9]+", blob, maxsplit=1)[0]
+    for token in wanted:
+        token = token.lower().strip()
+        if not token:
+            continue
+        if blob == token or first == token:
+            return True
+        if blob.startswith(token + " ") or blob.startswith(token + ",") or blob.startswith(
+            token + "."
+        ):
+            return True
+        if len(token) > 4 and token in blob:
+            return True
+    return False
+
+
 def click_matching_choice(container: Locator, wanted: tuple[str, ...]) -> bool:
     """Click a radio/checkbox/option whose label matches one of the tokens."""
-    choices = container.locator("label, [role='radio'], [role='option'], option")
+    choices = container.locator(
+        "label, [role='radio'], [role='option'], option, input[type='radio'] + span"
+    )
     try:
-        total = choices.count()
+        total = min(choices.count(), 80)
     except Exception:
         return False
 
@@ -1120,12 +1209,13 @@ def click_matching_choice(container: Locator, wanted: tuple[str, ...]) -> bool:
             continue
         if any(deny in text for deny in SUBMIT_TEXT_DENYLIST):
             continue
-        if any(token == text or token in text.split() for token in wanted):
-            try:
-                choice.click(timeout=2_000)
-                return True
-            except Exception:
-                continue
+        if not _choice_matches(text, wanted):
+            continue
+        try:
+            choice.click(timeout=2_000)
+            return True
+        except Exception:
+            continue
     return False
 
 
@@ -1409,6 +1499,8 @@ def fill_structured_facts(
 
     fill_by_aliases(page, FIELD_ALIASES["age"], age)
     fill_by_aliases(page, FIELD_ALIASES["current_employer"], employer)
+    start = usable_profile_value(profile.get("graduation_date", "")) or "December 2026"
+    fill_by_aliases(page, FIELD_ALIASES["start_date"], start)
 
     age_hits = answer_yes_no_question(page, AGE_18_YES_LABELS, "yes")
     if age_hits:
@@ -1859,6 +1951,14 @@ def fill_application(page: Page, profile: dict[str, Any], job: JobPosting | None
     for root in roots:
         fill_essay_answers(root, profile, job)
 
+    if uploaded:
+        print("[*] Resume parse pause — filling leftover identity fields...")
+        time.sleep(0.8)
+        for root in roots:
+            fill_common_identity(root, profile)
+            fill_education(root, profile)
+            fill_structured_facts(root, profile, job)
+
 
 def fill_greenhouse(page: Page, profile: dict[str, Any], job: JobPosting | None = None) -> None:
     print("[*] Detected Greenhouse application.")
@@ -1888,75 +1988,199 @@ def warn_if_walled_garden(ats: str) -> None:
         )
 
 
+def _form_page_key(page: Page) -> str:
+    """URL + visible field count so we can detect a new application step."""
+    try:
+        url = page.url or ""
+    except Exception:
+        url = ""
+    counts: list[int] = []
+    for root in application_roots(page):
+        try:
+            counts.append(
+                root.locator(
+                    "input:visible, textarea:visible, select:visible, [contenteditable='true']:visible"
+                ).count()
+            )
+        except Exception:
+            counts.append(0)
+    return f"{url}|{counts}"
+
+
+def _browser_alive(page: Page) -> bool:
+    try:
+        if page.is_closed():
+            return False
+        _ = page.url
+        return True
+    except Exception:
+        return False
+
+
+def fill_all_form_pages(
+    page: Page, profile: dict[str, Any], job: JobPosting | None = None
+) -> None:
+    """Fill the current page, click Continue/Next through extra steps, never Submit."""
+    seen: set[str] = set()
+    for step in range(8):
+        dismiss_cookie_banners(page)
+        fill_application(page, profile, job)
+        decline_self_identify(page)
+        check_consent_boxes(page)
+        answer_hear_about(page)
+        time.sleep(0.5)
+        fill_application(page, profile, job)
+        decline_self_identify(page)
+
+        signature = _form_page_key(page)
+        seen.add(signature)
+        if not click_continue_control(page):
+            invalid = visible_invalid_fields(page)
+            if invalid:
+                preview = "; ".join(invalid[:6])
+                print(f"[*] Remaining blank/invalid fields (yours to edit): {preview}")
+            return
+        print(f"  advanced to next form page (step {step + 1}).")
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=8_000)
+        except PlaywrightTimeoutError:
+            pass
+        time.sleep(0.9)
+        new_sig = _form_page_key(page)
+        if new_sig == signature:
+            print(
+                "  Continue did not advance — required fields are still empty. "
+                "Leaving this page open for you."
+            )
+            return
+        if new_sig in seen:
+            return
+
+
 # ---------------------------------------------------------------------------
 # Safety pause
 # ---------------------------------------------------------------------------
 
-def pause_for_manual_review(page: Page, job: JobPosting | None = None) -> str:
+def wait_for_human_finish(
+    page: Page,
+    profile: dict[str, Any],
+    job: JobPosting | None = None,
+) -> str:
     """
-    Pause for a human when AUTO_SUBMIT is off. If stdin is not a TTY (spawned
-    from the worker), leave the form prepped and continue instead of hanging.
+    Keep Chromium open on this one application until the human is done.
+
+    Next listing does not open until: thank-you page, dashboard button,
+    Enter in a terminal, or the window is closed.
+    While waiting, if the form advances to a new page, fill the new fields.
     """
     company = job.company if job else "this listing"
     title = job.title if job else ""
     url = job.best_url() if job else (page.url or "")
+    job_id = job.id if job else ""
     banner = "\n".join(
         [
             "",
             "=" * 72,
-            "FORM READY FOR REVIEW — AUTO_SUBMIT is off.",
+            "FORM IS OPEN — EDIT ANYTHING YOU WANT. NEXT APP WAITS.",
             "=" * 72,
             f"  Company : {company}",
             f"  Role    : {title or '—'}",
             f"  URL     : {url}",
             "",
-            "The form fields have been filled. Do all of the following in the browser:",
-            "  1. Read every auto-filled value (name, email, phone, links).",
-            "  2. Confirm the resume upload and any authorization answers.",
-            "  3. Complete remaining required questions yourself.",
-            "  4. If everything looks correct, click Submit yourself.",
-            "  5. If something looks wrong, edit or close the tab.",
+            "The next application will NOT open until this one is finished.",
+            "In the Chromium window:",
+            "  1. Check every auto-filled value (name, email, phone, links, resume).",
+            "  2. Fill anything still blank. Change any answer that looks wrong.",
+            "  3. Click Continue yourself if another page of questions appears.",
+            "  4. Click Submit yourself when it looks right.",
             "",
-            "This window stays open until you come back here and press Enter.",
-            "You can also leave it prepped and bulk-approve later from the Application Queue.",
+            "When you are done, either:",
+            "  • Wait — a thank-you page is detected, then Sheets syncs and the next role opens",
+            "  • Click a button in the Application Queue dashboard",
+            "  • Press Enter in this terminal (if you launched the bot yourself)",
             "=" * 72,
             "",
         ]
     )
     bot_notify(banner)
-    if not sys.stdin.isatty():
-        bot_notify(
-            "[!] No terminal attached — leaving this form prepped and continuing. "
-            "Set AUTO_SUBMIT=1 to click Submit automatically."
+    if job is not None:
+        update_match_status(
+            job.id,
+            fill_status=STATUS_REVIEWING,
+            prepped_at=utc_now(),
+            sheet_error="",
         )
-        return STATUS_PREPPED
-    try:
-        input(">>> Press Enter in this terminal when you are finished reviewing... ")
-    except (EOFError, KeyboardInterrupt):
-        bot_notify("[!] Interrupted or no TTY — closing the browser without submitting.")
-        return STATUS_PREPPED
-
-    submitted = False
-    try:
-        submitted = _confirm(
-            "Did you click Submit yourself? Sync this application to Google Sheets? [y/N] ",
-            default_yes=False,
-        )
-    except (EOFError, KeyboardInterrupt):
-        submitted = False
+    write_review_signal(job_id, "waiting", action="", company=company, title=title, url=url)
+    write_bot_lock(job_id)
 
     try:
-        page.context.close()
+        page.bring_to_front()
     except Exception:
         pass
 
-    if submitted and job is not None:
-        _sync_after_approval(job)
-        return "applied"
-    bot_notify(
-        f"[*] Left {company} — {title or 'listing'} in the Application Queue as ready for review."
-    )
-    return STATUS_PREPPED
+    terminal_done = {"hit": False}
+
+    def _stdin_wait() -> None:
+        try:
+            input(">>> Press Enter when you have submitted or are done editing this form... ")
+            terminal_done["hit"] = True
+        except (EOFError, KeyboardInterrupt):
+            terminal_done["hit"] = True
+
+    if sys.stdin.isatty():
+        threading.Thread(target=_stdin_wait, daemon=True).start()
+
+    last_key = _form_page_key(page)
+    while True:
+        if not _browser_alive(page):
+            bot_notify("[*] Browser closed. This role stays in the queue as ready for review.")
+            return STATUS_PREPPED
+
+        if submission_looks_successful(page):
+            bot_notify("[*] Thank-you page detected — treating this as submitted.")
+            time.sleep(1.5)
+            if job is not None:
+                _sync_after_approval(job)
+            return STATUS_APPLIED
+
+        signal = load_review_signal()
+        action = str(signal.get("action") or "").strip().lower()
+        if action in {"submitted", "applied"}:
+            if job is not None:
+                _sync_after_approval(job)
+            return STATUS_APPLIED
+        if action == "skip":
+            bot_notify(f"[*] Skipped {company} — {title or 'listing'} from the dashboard.")
+            return STATUS_SKIPPED
+        if action in {"next", "done", "prepped"}:
+            bot_notify(
+                f"[*] Left {company} — {title or 'listing'} in the queue as ready for review."
+            )
+            return STATUS_PREPPED
+
+        if terminal_done["hit"]:
+            if submission_looks_successful(page):
+                if job is not None:
+                    _sync_after_approval(job)
+                return STATUS_APPLIED
+            bot_notify(
+                f"[*] Left {company} — {title or 'listing'} in the queue as ready for review."
+            )
+            return STATUS_PREPPED
+
+        key = _form_page_key(page)
+        if key != last_key:
+            time.sleep(1.1)
+            key = _form_page_key(page)
+            if key != last_key and _browser_alive(page) and not submission_looks_successful(page):
+                bot_notify("[*] Form changed — filling new fields (won't overwrite what you typed).")
+                fill_application(page, profile, job)
+                decline_self_identify(page)
+                check_consent_boxes(page)
+                answer_hear_about(page)
+                last_key = _form_page_key(page)
+
+        time.sleep(0.8)
 
 
 def _sync_after_approval(job: JobPosting) -> None:
@@ -1994,8 +2218,14 @@ def run(
         update_match_status(job.id, fill_status=STATUS_PREPPING)
 
     headless = playwright_headless()
-    browser = playwright.chromium.launch(headless=headless, slow_mo=0)
-    context = browser.new_context(accept_downloads=False)
+    launch_kwargs: dict[str, Any] = {"headless": headless, "slow_mo": 0}
+    if not headless:
+        launch_kwargs["args"] = ["--start-maximized"]
+    browser = playwright.chromium.launch(**launch_kwargs)
+    context = browser.new_context(
+        accept_downloads=False,
+        no_viewport=not headless,
+    )
     page = context.new_page()
     page.set_default_timeout(DEFAULT_TIMEOUT_MS)
 
@@ -2011,17 +2241,9 @@ def run(
         time.sleep(0.8)
         open_application_form(page)
 
-        handlers = {
-            "greenhouse": fill_greenhouse,
-            "lever": fill_lever,
-            "ashby": fill_ashby,
-            "workday": fill_generic,
-            "linkedin": fill_generic,
-            "indeed": fill_generic,
-            "generic": fill_generic,
-        }
         warn_if_walled_garden(ats)
-        handlers.get(ats, fill_generic)(page, profile, job)
+        print(f"[*] Filling {ats} application across all pages (Submit stays with you)...")
+        fill_all_form_pages(page, profile, job)
 
         if auto_submit_enabled():
             bot_notify(
@@ -2033,32 +2255,22 @@ def run(
                 if job is not None:
                     _sync_after_approval(job)
                 return STATUS_APPLIED
-            if job is not None:
-                update_match_status(
-                    job.id,
-                    fill_status=STATUS_FAILED,
-                    sheet_error="Filled the form but could not confirm Submit.",
-                )
-            bot_notify("[warn] Auto-submit did not confirm. Marked as failed.")
-            return STATUS_FAILED
+            bot_notify(
+                "[warn] Auto-submit did not confirm. Leaving the form open so you can finish it."
+            )
 
         if job is not None:
-            update_match_status(
-                job.id,
-                fill_status=STATUS_PREPPED,
-                prepped_at=utc_now(),
-                sheet_error="",
-            )
             bot_notify(
                 f"[*] Form prepped for {job.company} — {job.title}. "
-                "Pausing before Submit for your review."
+                "Window stays open. Edit anything, then Submit. Next role waits."
             )
-        status = pause_for_manual_review(page, job)
+        status = wait_for_human_finish(page, profile, job)
     finally:
         try:
             browser.close()
         except Exception:
             pass
+        clear_review_signal()
         if release_lock:
             clear_bot_lock()
         else:
@@ -2159,7 +2371,14 @@ def run_job_id(playwright: Playwright, profile: dict[str, Any], job_id: str) -> 
 def _jobs_from_ids(job_ids: list[str]) -> list[JobPosting]:
     jobs: list[JobPosting] = []
     seen: set[str] = set()
-    skip_statuses = {STATUS_PREPPED, STATUS_APPLIED, STATUS_SYNCED, STATUS_SKIPPED, "filled"}
+    skip_statuses = {
+        STATUS_REVIEWING,
+        STATUS_PREPPED,
+        STATUS_APPLIED,
+        STATUS_SYNCED,
+        STATUS_SKIPPED,
+        "filled",
+    }
     for job_id in job_ids:
         if not job_id or job_id in seen:
             continue
@@ -2196,42 +2415,45 @@ def run_auto_prep(
     include_pending: bool = False,
 ) -> None:
     """
-    Drain the automatic prep queue. Fill each Greenhouse/Lever/Ashby form.
-    With AUTO_SUBMIT=1, click Submit and continue to the next role.
+    Drain the automatic prep queue one listing at a time. The next form does
+    not open until the current Chromium window is finished (submitted, skipped,
+    or closed).
     """
     write_bot_lock()
     processed = 0
+    seeded_pending = False
     try:
         while True:
-            batch_ids = take_prep_batch()
-            if not batch_ids and include_pending and processed == 0:
-                batch_ids = [job.id for job in load_pending_matches()]
+            if include_pending and not seeded_pending:
+                pending_ids = [job.id for job in load_pending_matches()]
+                if pending_ids:
+                    enqueue_for_prep(pending_ids)
+                seeded_pending = True
                 include_pending = False
-            if not batch_ids:
+
+            job_id = take_prep_one()
+            if not job_id:
                 break
-
-            jobs = _jobs_from_ids(batch_ids)
-            leftover: list[str] = []
-            for index, job in enumerate(jobs, start=1):
-                if limit > 0 and processed >= limit:
-                    leftover.extend(remaining.id for remaining in jobs[index - 1 :])
-                    break
-                _announce_job(job, processed + 1, processed + len(jobs) - index + 1)
+            if limit > 0 and processed >= limit:
+                enqueue_for_prep([job_id])
                 bot_notify(
-                    f"[*] Auto-applying {job.company} — {job.title}."
-                    if auto_submit_enabled()
-                    else f"[*] Auto-prepping {job.company} — {job.title}. Submit stays with you."
-                )
-                _prep_one(playwright, profile, job, release_lock=False)
-                processed += 1
-
-            if leftover:
-                enqueue_for_prep(leftover)
-                bot_notify(
-                    f"[bot] Reached --limit {limit}. {len(leftover)} job(s) stay queued."
+                    f"[bot] Reached --limit {limit}. Remaining jobs stay queued."
                 )
                 break
+
+            jobs = _jobs_from_ids([job_id])
+            if not jobs:
+                continue
+            job = jobs[0]
+            _announce_job(job, processed + 1, processed + 1)
+            bot_notify(
+                f"[*] Opening one application: {job.company} — {job.title}. "
+                "The next role waits until you finish this form."
+            )
+            _prep_one(playwright, profile, job, release_lock=False)
+            processed += 1
     finally:
+        clear_review_signal()
         clear_bot_lock()
 
     if processed == 0:
@@ -2239,12 +2461,7 @@ def run_auto_prep(
             "[bot] Auto-prep queue is empty. New $150k+ matches are queued automatically after a scrape."
         )
     bot_notify(
-        f"[*] Auto-apply session complete. {processed} form(s) processed."
-        if auto_submit_enabled()
-        else (
-            f"[*] Auto-prep session complete. {processed} form(s) filled and left ready for review. "
-            "Approve them from the Application Queue dashboard after you click Submit yourself."
-        )
+        f"[*] Session complete. {processed} application(s) opened one at a time."
     )
 
 

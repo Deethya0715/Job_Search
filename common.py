@@ -35,6 +35,7 @@ TRACKER_LOG_PATH = ROOT / "tracker_log.json"
 BOT_LOCK_PATH = ROOT / ".bot_running"
 BOT_LOG_PATH = ROOT / "bot.log"
 PREP_QUEUE_PATH = ROOT / "prep_queue.json"
+REVIEW_SIGNAL_PATH = ROOT / ".bot_review.json"
 STOP_FLAG_PATH = ROOT / ".worker_stop"
 
 load_dotenv(ENV_PATH)
@@ -50,6 +51,7 @@ GOOGLE_SHEETS_ID_DEFAULT = "1TO5rtMymBoo64X2bld2R-HqBGlWim_m7kHNcHkICtxY"
 # fill_status values used across aggregator, bot, tracker, and the dashboard.
 STATUS_PENDING = "pending"  # discovered, waiting for automatic Playwright prep
 STATUS_PREPPING = "prepping"  # Playwright is filling the form now
+STATUS_REVIEWING = "reviewing"  # browser open; human is editing / submitting
 STATUS_PREPPED = "prepped"  # form filled, waiting for human Submit / dashboard approval
 STATUS_APPLIED = "applied"  # human confirmed Submit
 STATUS_SYNCED = "synced"  # row landed in Google Sheets
@@ -59,6 +61,7 @@ STATUS_FAILED = "failed"
 STATUS_LABELS = {
     STATUS_PENDING: "Queued — waiting for Playwright",
     STATUS_PREPPING: "Prepping now",
+    STATUS_REVIEWING: "Open in browser — edit then Submit",
     STATUS_PREPPED: "Ready for review",
     STATUS_APPLIED: "Submitted — syncing",
     STATUS_SYNCED: "Synced to Sheets",
@@ -377,6 +380,7 @@ def default_worker_status() -> dict[str, Any]:
         "last_scrape_error": "",
         "last_report_at": "",
         "next_report_at": "21:00 America/Chicago",
+        "next_scrape_at": "",
         "jobs_today": 0,
         "queue_size": 0,
         "prepped": 0,
@@ -396,7 +400,9 @@ def save_worker_status(**fields: Any) -> dict[str, Any]:
     status.update(fields)
     status["last_heartbeat"] = utc_now()
     status["jobs_today"] = len(jobs_found_on())
-    status["queue_size"] = count_by_status(STATUS_PENDING, STATUS_PREPPING, STATUS_PREPPED)
+    status["queue_size"] = count_by_status(
+        STATUS_PENDING, STATUS_PREPPING, STATUS_REVIEWING, STATUS_PREPPED
+    )
     status["prepped"] = count_by_status(STATUS_PREPPED)
     status["synced"] = count_by_status(STATUS_SYNCED)
     save_json(WORKER_STATUS_PATH, status)
@@ -541,6 +547,7 @@ def enqueue_for_prep(job_ids: list[str]) -> list[str]:
             continue
         job = find_match(job_id)
         if job is not None and job.fill_status in {
+            STATUS_REVIEWING,
             STATUS_PREPPED,
             STATUS_APPLIED,
             STATUS_SYNCED,
@@ -564,16 +571,70 @@ def take_prep_batch() -> list[str]:
     return queued
 
 
+def take_prep_one() -> str | None:
+    """Pop the next queued job id so only one application is in flight."""
+    queued = load_prep_queue_ids()
+    if not queued:
+        return None
+    job_id = queued[0]
+    remaining = queued[1:]
+    save_json(
+        PREP_QUEUE_PATH,
+        {"job_ids": remaining, "updated_at": utc_now(), "count": len(remaining)},
+    )
+    return job_id
+
+
+def load_review_signal() -> dict[str, Any]:
+    payload = load_json(REVIEW_SIGNAL_PATH, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def write_review_signal(job_id: str, state: str, **fields: Any) -> dict[str, Any]:
+    payload = load_review_signal()
+    payload.update(
+        {
+            "job_id": job_id,
+            "state": state,
+            "updated_at": utc_now(),
+        }
+    )
+    payload.update(fields)
+    save_json(REVIEW_SIGNAL_PATH, payload)
+    return payload
+
+
+def set_review_action(action: str) -> dict[str, Any]:
+    """Dashboard / human signal: submitted | skip | next."""
+    payload = load_review_signal()
+    payload["action"] = str(action or "").strip().lower()
+    payload["updated_at"] = utc_now()
+    save_json(REVIEW_SIGNAL_PATH, payload)
+    return payload
+
+
+def clear_review_signal() -> None:
+    try:
+        REVIEW_SIGNAL_PATH.unlink(missing_ok=True)
+    except TypeError:
+        if REVIEW_SIGNAL_PATH.exists():
+            REVIEW_SIGNAL_PATH.unlink()
+    except OSError:
+        pass
+
+
 def reset_orphaned_prepping() -> int:
-    """If Playwright is not running, roll crashed 'prepping' rows back to pending."""
+    """If Playwright is not running, roll crashed in-flight rows back."""
     if bot_is_running():
         return 0
     reset = 0
     for job in load_match_jobs():
-        if job.fill_status != STATUS_PREPPING:
-            continue
-        update_match_status(job.id, fill_status=STATUS_PENDING)
-        reset += 1
+        if job.fill_status == STATUS_PREPPING:
+            update_match_status(job.id, fill_status=STATUS_PENDING)
+            reset += 1
+        elif job.fill_status == STATUS_REVIEWING:
+            update_match_status(job.id, fill_status=STATUS_PREPPED)
+            reset += 1
     return reset
 
 
@@ -640,7 +701,7 @@ def spawn_auto_prep_bot() -> str:
         + (
             "Forms are filled and submitted on Greenhouse/Lever/Ashby."
             if auto_submit_enabled()
-            else "Each form is filled and paused before Submit."
+            else "One form stays open until you edit and Submit it; the next role waits."
         )
     )
     append_log_file(BOT_LOG_PATH, message)

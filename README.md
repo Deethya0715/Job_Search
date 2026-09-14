@@ -16,7 +16,7 @@ Use this only for roles you intend to apply to, with your own information, and w
 | Sheets tracker | `tracker_sync.py` | `gspread` append after you confirm a submission |
 | Digest | `reporter.py` | Markdown + SMTP, including Sheets sync status |
 | Clock | `scheduler.py` | 9:00 PM America/Chicago scrape + email |
-| 24/7 engine | `worker.py` | Background scrape loop + nightly schedule + auto-prep launch |
+| 24/7 engine | `worker.py` | Hourly 8 AM–7 PM CT scrape + nightly schedule + auto-prep launch |
 | Dashboard | `app.py` | Streamlit UI: monitor, feed, bulk-review queue, tracker |
 
 Supporting files: `common.py`, `ats_companies.json`.
@@ -117,7 +117,7 @@ streamlit run app.py
 
 The UI has four sections:
 
-1. **Live Monitor Status** — toggle the 24/7 worker (scrape every 45 minutes, email at 9:00 PM CT). New $150k+ matches are queued for Playwright automatically.
+1. **Live Monitor Status** — toggle the worker (hourly scrapes 8:00 AM–7:00 PM CT, email at 9:00 PM CT). New $150k+ matches are queued for Playwright automatically.
 2. **Discovered Jobs Feed** — scored listings, salaries, and links from every board.
 3. **Application Queue** — auto-prepped roles with live status. Review the paused Playwright window, click **Submit yourself**, then **Approve selected & sync** (or **Approve all ready for review**) to write Sheets rows. There is no per-job Prep button.
 4. **Tracker Sync Status** — rows that landed in Google Sheets, plus failures to retry.
@@ -161,10 +161,10 @@ python bot.py --job-id <id>
 
 `--from-matches` without `--auto-prep` is the older interactive flow (confirm each listing).
 
-### 24/7 worker and 9:00 PM email
+### Hourly worker and 9:00 PM email
 
 ```powershell
-python worker.py                 # scrape loop + 9:00 PM report
+python worker.py                 # hourly 8 AM–7 PM CT scrapes + 9:00 PM report
 python scheduler.py              # 9:00 PM only
 python reporter.py               # email/Markdown now
 python reporter.py --no-email
@@ -210,7 +210,7 @@ It will not invent essay answers or bypass CAPTCHAs. Set `AUTO_SUBMIT=0` if you 
 ```
 automated_job/
   app.py                Streamlit dashboard
-  worker.py             24/7 scrape + 9 PM scheduler
+  worker.py             hourly 8 AM–7 PM CT scrape + 9 PM scheduler
   aggregator.py         multi-board scrape / score / de-dupe / auto-queue Playwright
   bot.py                Playwright filler (AUTO_SUBMIT clicks Submit on Greenhouse/Lever/Ashby)
   tracker_sync.py       Google Sheets append
