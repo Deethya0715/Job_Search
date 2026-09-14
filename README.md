@@ -33,7 +33,7 @@ Supporting files: `common.py`, `ats_companies.json`.
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-local.txt
 python -m playwright install chromium
 copy .env.example .env
 ```

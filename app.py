@@ -10,42 +10,56 @@ Tabs:
 
 from __future__ import annotations
 
+import traceback
+
 import pandas as pd
 import streamlit as st
 
-from common import (
-    BOT_LOG_PATH,
-    STATUS_APPLIED,
-    STATUS_FAILED,
-    STATUS_PENDING,
-    STATUS_PREPPED,
-    STATUS_PREPPING,
-    STATUS_SKIPPED,
-    STATUS_SYNCED,
-    WORKER_LOG_PATH,
-    auto_submit_enabled,
-    bot_is_running,
-    bot_lock_info,
-    count_by_status,
-    env,
-    find_match,
-    google_sheets_id,
-    jobs_found_on,
-    load_match_jobs,
-    load_prep_queue_ids,
-    load_profile,
-    load_seen_jobs,
-    load_tracker_log,
-    load_worker_status,
-    local_now,
-    request_auto_prep,
-    service_account_path,
-    status_label,
-    update_match_status,
-)
-from worker import start_worker_process, stop_worker_process, worker_is_running
+try:
+    from common import (
+        BOT_LOG_PATH,
+        STATUS_APPLIED,
+        STATUS_FAILED,
+        STATUS_PENDING,
+        STATUS_PREPPED,
+        STATUS_PREPPING,
+        STATUS_SKIPPED,
+        STATUS_SYNCED,
+        WORKER_LOG_PATH,
+        auto_submit_enabled,
+        bot_is_running,
+        bot_lock_info,
+        count_by_status,
+        env,
+        find_match,
+        google_sheets_id,
+        jobs_found_on,
+        load_match_jobs,
+        load_prep_queue_ids,
+        load_profile,
+        load_seen_jobs,
+        load_tracker_log,
+        load_worker_status,
+        local_now,
+        request_auto_prep,
+        service_account_path,
+        status_label,
+        update_match_status,
+    )
+except Exception as exc:
+    st.set_page_config(page_title="Job Hunt Engine", layout="wide")
+    st.error("Failed to import `common`. Streamlit Cloud was hiding this error:")
+    st.code("".join(traceback.format_exception(exc)))
+    st.stop()
 
 SHEET_URL = f"https://docs.google.com/spreadsheets/d/{google_sheets_id()}/edit"
+
+
+def _worker_controls():
+    """Import worker lazily so the dashboard still boots on Streamlit Cloud."""
+    from worker import start_worker_process, stop_worker_process, worker_is_running
+
+    return start_worker_process, stop_worker_process, worker_is_running
 
 
 def _inject_css() -> None:
@@ -165,7 +179,13 @@ def mark_submitted_and_sync(job_id: str, contact_person: str, contact_email: str
 
 def render_monitor() -> None:
     status = load_worker_status()
-    running = worker_is_running()
+    try:
+        start_worker_process, stop_worker_process, worker_is_running = _worker_controls()
+        running = worker_is_running()
+    except Exception as exc:
+        st.error(f"Worker module could not load in this environment: {exc}")
+        st.info("The queue and tracker still work. Run the 24/7 monitor on your local machine.")
+        return
     if status.get("state") == "running" and not running:
         status["state"] = "stopped"
         status["message"] = "Worker process is not running."
@@ -195,17 +215,20 @@ def render_monitor() -> None:
 
         scrape_now = st.button("Scrape once now", use_container_width=True)
         if scrape_now:
-            with st.spinner("Querying every board…"):
-                from aggregator import discover
+            try:
+                with st.spinner("Querying every board…"):
+                    from aggregator import discover
 
-                fresh = discover(load_profile())
-            extra = (
-                f" Playwright will auto-apply {len(fresh)} new $150k+ Greenhouse/Lever/Ashby role(s)."
-                if fresh
-                else ""
-            )
-            st.success(f"Scrape finished. {len(fresh)} new matching role(s).{extra}")
-            st.rerun()
+                    fresh = discover(load_profile())
+                extra = (
+                    f" Playwright will auto-apply {len(fresh)} new $150k+ Greenhouse/Lever/Ashby role(s)."
+                    if fresh
+                    else ""
+                )
+                st.success(f"Scrape finished. {len(fresh)} new matching role(s).{extra}")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Scrape is not available here: {exc}")
         if st.button("Refresh status", use_container_width=True):
             st.rerun()
 
@@ -275,6 +298,12 @@ def render_queue() -> None:
     c3.metric("Ready for review", ready_n)
     c4.metric("Submitted / failed", f"{applied_n} / {failed_n}")
 
+    if auto_submit_enabled():
+        st.success(
+            "AUTO_SUBMIT is on. Playwright will fill Greenhouse, Lever, and Ashby forms "
+            "and click Submit. Company portals (Workday, TikTok, Google, etc.) stay skipped."
+        )
+
     if bot_is_running():
         lock = bot_lock_info()
         current = find_match(str(lock.get("job_id") or ""))
@@ -291,10 +320,14 @@ def render_queue() -> None:
                 "The form will pause before Submit — review that browser window, then approve here."
             )
     elif waiting_ids:
-        st.info(
-            f"{len(waiting_ids)} role(s) are queued for automatic Playwright prep."
+        action = "auto-apply" if auto_submit_enabled() else "automatic Playwright prep"
+        st.info(f"{len(waiting_ids)} role(s) are queued for {action}.")
+        button_label = (
+            "Start auto-apply (fill + Submit)"
+            if auto_submit_enabled()
+            else "Start Playwright for queued roles"
         )
-        if st.button("Start Playwright for queued roles", use_container_width=False):
+        if st.button(button_label, use_container_width=False):
             st.info(request_auto_prep() or "Queue is already empty.")
             st.rerun()
 
@@ -387,7 +420,7 @@ def render_queue() -> None:
         "Approve selected & sync",
         type="primary",
         use_container_width=True,
-        help="Use after you click Submit yourself on the auto-prepped forms.",
+        help="For leftovers you submitted yourself. Auto-submit already writes Sheets when it succeeds.",
     )
     approve_ready = a2.button(
         "Approve all ready for review",
@@ -555,7 +588,12 @@ def main() -> None:
         f"{local_now().strftime('%A %I:%M %p %Z')} · Playwright auto-applies Greenhouse/Lever/Ashby matches"
     )
 
-    running = worker_is_running()
+    running = False
+    try:
+        _, _, worker_is_running = _worker_controls()
+        running = worker_is_running()
+    except Exception:
+        running = False
     today = jobs_found_on()
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Monitor", "Active" if running else "Stopped")

@@ -71,8 +71,51 @@ APPLY_OPEN_PATTERN = re.compile(
     re.I,
 )
 SUBMIT_PATTERN = re.compile(
-    r"submit application|submit your application|^submit$|send application|complete application",
+    r"submit.{0,24}application|send.{0,24}application|complete application|^submit$",
     re.I,
+)
+CONTINUE_PATTERN = re.compile(
+    r"^(continue|next|save and continue|review application)$",
+    re.I,
+)
+CONSENT_LABELS = (
+    "i agree",
+    "i acknowledge",
+    "i consent",
+    "i certify",
+    "i have read",
+    "privacy policy",
+    "terms and conditions",
+    "candidate privacy",
+    "true and complete",
+    "accurate and complete",
+    "gdpr",
+)
+DECLINE_EEO_TOKENS = (
+    "decline to self-identify",
+    "decline to self identify",
+    "i don't wish to answer",
+    "i do not wish to answer",
+    "prefer not to say",
+    "prefer not to answer",
+    "i don't want to answer",
+)
+HEAR_ABOUT_LABELS = (
+    "how did you hear",
+    "how did you find",
+    "how you heard",
+    "referral source",
+    "source of hire",
+)
+HEAR_ABOUT_ANSWERS = (
+    "linkedin",
+    "university",
+    "career site",
+    "company website",
+    "job board",
+    "simplify",
+    "other",
+    "internet",
 )
 THANKS_HINTS = (
     "thank you",
@@ -110,6 +153,7 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "your location",
         "city and state",
     ),
+    "country": ("country", "country of residence", "country/region"),
     "languages": (
         "languages",
         "language(s)",
@@ -279,11 +323,20 @@ def click_role_button(page: Page, pattern: re.Pattern[str]) -> bool:
             if not candidate:
                 continue
             try:
+                candidate.scroll_into_view_if_needed(timeout=2_000)
+            except Exception:
+                pass
+            try:
                 candidate.click(timeout=3_000)
                 time.sleep(0.8)
                 return True
             except Exception:
-                continue
+                try:
+                    candidate.click(timeout=3_000, force=True)
+                    time.sleep(0.8)
+                    return True
+                except Exception:
+                    continue
     return False
 
 
@@ -299,12 +352,17 @@ def open_application_form(page: Page) -> None:
         time.sleep(0.6)
     try:
         page.wait_for_selector(
-            "iframe[src*='greenhouse'], iframe[src*='lever'], iframe[src*='ashby'], "
-            "input[type='email'], #first_name, input[name='job_application[first_name]']",
-            timeout=8_000,
+            "iframe#grnhse_iframe, iframe[id*='grnhse'], iframe[src*='greenhouse'], "
+            "iframe[src*='lever'], iframe[src*='ashby'], input[type='email'], "
+            "#first_name, input[name='job_application[first_name]']",
+            timeout=12_000,
         )
     except PlaywrightTimeoutError:
         pass
+    for _ in range(8):
+        if form_fields_present(page):
+            return
+        time.sleep(0.7)
 
 
 def submission_looks_successful(page: Page) -> bool:
@@ -314,36 +372,225 @@ def submission_looks_successful(page: Page) -> bool:
         text = ""
     if any(hint in text for hint in THANKS_HINTS):
         return True
-    try:
-        invalid = page.locator(":invalid")
-        if invalid.count() > 0 and invalid.first.is_visible():
-            return False
-    except Exception:
-        pass
+    if visible_invalid_fields(page):
+        return False
     return False
 
 
-def submit_filled_application(page: Page) -> bool:
-    if not click_role_button(page, SUBMIT_PATTERN):
-        print("[warn] Could not find a Submit button.")
-        return False
+def visible_invalid_fields(page: Page) -> list[str]:
+    labels: list[str] = []
+    for root in application_roots(page):
+        try:
+            invalids = root.locator(":invalid")
+            total = min(invalids.count(), 40)
+        except Exception:
+            continue
+        for index in range(total):
+            control = invalids.nth(index)
+            try:
+                if not control.is_visible():
+                    continue
+            except Exception:
+                continue
+            blob = " ".join(
+                (associated_label_text(root, control) + " " + attr_blob(control)).split()
+            )
+            labels.append(blob[:120] or f"unnamed-field-{index}")
+    return labels
+
+
+def _click_locator(candidate: Locator) -> bool:
     try:
-        page.wait_for_load_state("networkidle", timeout=12_000)
-    except PlaywrightTimeoutError:
-        pass
-    time.sleep(1.0)
-    if submission_looks_successful(page):
-        print("[*] Submission confirmed on the page.")
-        return True
-    try:
-        invalid = page.locator(":invalid")
-        if invalid.count() > 0 and invalid.first.is_visible():
-            print("[warn] Submit clicked but required fields are still invalid.")
-            return False
+        candidate.scroll_into_view_if_needed(timeout=2_000)
     except Exception:
         pass
-    print("[*] Submit clicked; no confirmation text — treating as submitted.")
-    return True
+    try:
+        candidate.click(timeout=3_000)
+        time.sleep(0.8)
+        return True
+    except Exception:
+        try:
+            candidate.click(timeout=3_000, force=True)
+            time.sleep(0.8)
+            return True
+        except Exception:
+            return False
+
+
+def click_submit_control(page: Page) -> bool:
+    if click_role_button(page, SUBMIT_PATTERN):
+        print("  clicked Submit (role).")
+        return True
+    selectors = (
+        "#submit_app",
+        "input#submit_app",
+        "input[type='submit']",
+        "button[type='submit']",
+        ".template-btn-submit",
+        "button.postings-btn",
+    )
+    for root in application_roots(page):
+        for selector in selectors:
+            candidate = first_visible(visible_locator(root, selector))
+            if candidate and _click_locator(candidate):
+                print(f"  clicked Submit via {selector}.")
+                return True
+        try:
+            by_text = first_visible(root.get_by_text(SUBMIT_PATTERN))
+        except Exception:
+            by_text = None
+        if by_text and _click_locator(by_text):
+            print("  clicked Submit (text).")
+            return True
+    print("[warn] Could not find a Submit button.")
+    return False
+
+
+def click_continue_control(page: Page) -> bool:
+    return click_role_button(page, CONTINUE_PATTERN)
+
+
+def decline_self_identify(page: Page) -> int:
+    answered = 0
+    for root in application_roots(page):
+        selects = root.locator("select")
+        try:
+            total = min(selects.count(), 80)
+        except Exception:
+            total = 0
+        for index in range(total):
+            select = selects.nth(index)
+            try:
+                if not select.is_visible():
+                    continue
+                context = f"{attr_blob(select)} {associated_label_text(root, select)}"
+                if "gender" in context or "race" in context or "veteran" in context or "ethnicity" in context or "disability" in context or "hispanic" in context:
+                    if select_native_option(select, DECLINE_EEO_TOKENS):
+                        answered += 1
+            except Exception:
+                continue
+        groups = root.locator("fieldset, [role='group'], .field, .form-group")
+        try:
+            group_count = min(groups.count(), 120)
+        except Exception:
+            group_count = 0
+        for index in range(group_count):
+            group = groups.nth(index)
+            try:
+                text = " ".join((group.inner_text() or "").split()).lower()
+            except Exception:
+                continue
+            if not any(token in text for token in ("gender", "race", "veteran", "ethnicity", "disability", "hispanic")):
+                continue
+            if click_matching_choice(group, DECLINE_EEO_TOKENS):
+                answered += 1
+    if answered:
+        print(f"  declined {answered} self-identify question(s).")
+    return answered
+
+
+def check_consent_boxes(page: Page) -> int:
+    checked = 0
+    skip_bits = ("disability", "veteran", "sponsorship", "gender", "race", "hispanic")
+    for root in application_roots(page):
+        boxes = root.locator("input[type='checkbox']")
+        try:
+            total = min(boxes.count(), 80)
+        except Exception:
+            total = 0
+        for index in range(total):
+            box = boxes.nth(index)
+            try:
+                if not box.is_visible() or box.is_checked():
+                    continue
+            except Exception:
+                continue
+            blob = f"{attr_blob(box)} {associated_label_text(root, box)}"
+            if any(bit in blob for bit in skip_bits):
+                continue
+            required = False
+            try:
+                required = bool(box.get_attribute("required"))
+            except Exception:
+                required = False
+            if not required and not looks_like(blob, CONSENT_LABELS):
+                continue
+            try:
+                box.check(timeout=2_000)
+                checked += 1
+            except Exception:
+                if _click_locator(box):
+                    checked += 1
+    if checked:
+        print(f"  checked {checked} consent/certify box(es).")
+    return checked
+
+
+def answer_hear_about(page: Page) -> int:
+    answered = 0
+    for root in application_roots(page):
+        selects = root.locator("select")
+        try:
+            total = min(selects.count(), 80)
+        except Exception:
+            total = 0
+        for index in range(total):
+            select = selects.nth(index)
+            try:
+                if not select.is_visible():
+                    continue
+                context = f"{attr_blob(select)} {associated_label_text(root, select)}"
+                if looks_like(context, HEAR_ABOUT_LABELS) and select_native_option(
+                    select, HEAR_ABOUT_ANSWERS
+                ):
+                    answered += 1
+            except Exception:
+                continue
+    if answered:
+        print(f"  answered {answered} 'how did you hear' question(s).")
+    return answered
+
+
+def submit_filled_application(page: Page, profile: dict[str, Any] | None = None) -> bool:
+    """Click Continue/Next through multi-step ATS forms, then Submit."""
+    for step in range(8):
+        dismiss_cookie_banners(page)
+        decline_self_identify(page)
+        check_consent_boxes(page)
+        answer_hear_about(page)
+
+        if click_continue_control(page):
+            print(f"  clicked Continue/Next (step {step + 1}).")
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=8_000)
+            except PlaywrightTimeoutError:
+                pass
+            time.sleep(0.8)
+            if profile is not None:
+                fill_application(page, profile)
+            continue
+
+        if not click_submit_control(page):
+            return False
+        try:
+            page.wait_for_load_state("networkidle", timeout=12_000)
+        except PlaywrightTimeoutError:
+            pass
+        time.sleep(1.2)
+        if submission_looks_successful(page):
+            print("[*] Submission confirmed on the page.")
+            return True
+        invalid = visible_invalid_fields(page)
+        if invalid:
+            preview = "; ".join(invalid[:6])
+            print(f"[warn] Submit clicked but required fields are still invalid: {preview}")
+            if step < 2:
+                continue
+            return False
+        print("[*] Submit clicked; no confirmation text — treating as submitted.")
+        return True
+    print("[warn] Ran out of Continue/Submit steps without confirmation.")
+    return False
 
 
 def application_roots(page: Page) -> list[Target]:
@@ -353,10 +600,11 @@ def application_roots(page: Page) -> list[Target]:
         if frame == page.main_frame:
             continue
         host = (frame.url or "").lower()
+        name = (frame.name or "").lower()
         if any(
             token in host
             for token in ("greenhouse", "lever", "ashby", "boards.greenhouse")
-        ):
+        ) or any(token in name for token in ("grnhse", "greenhouse", "lever", "ashby")):
             roots.append(frame)
     return roots
 
@@ -591,7 +839,8 @@ def answer_yes_no_question(page: Target, question_aliases: tuple[str, ...], answ
     # Fieldsets / question cards that contain radios or checkboxes.
     groups = page.locator(
         "fieldset, [role='group'], .application-question, .question, "
-        ".select__control, [data-testid*='question']"
+        ".select__control, [data-testid*='question'], .field, .form-group, "
+        ".application-field, li.question, [class*='application-form-field']"
     )
     try:
         group_count = min(groups.count(), 250)
@@ -733,6 +982,20 @@ def fill_common_identity(page: Target, profile: dict[str, Any]) -> None:
         github,
     ) or fill_by_aliases(page, FIELD_ALIASES["github"], github)
 
+    website = usable_profile_value((profile.get("links") or {}).get("website", "")) or github
+    try_fill_selectors(
+        page,
+        [
+            "input[name='urls[Portfolio]']",
+            "input[name='urls[Website]']",
+            "input[name*='website' i]",
+            "input[name*='portfolio' i]",
+            "input[placeholder*='Website' i]",
+            "input[placeholder*='Portfolio' i]",
+        ],
+        website,
+    )
+
     location = usable_profile_value(profile.get("location", ""))
     try_fill_selectors(
         page,
@@ -745,6 +1008,28 @@ def fill_common_identity(page: Target, profile: dict[str, Any]) -> None:
         ],
         location,
     ) or fill_by_aliases(page, FIELD_ALIASES["location"], location)
+
+    country = usable_profile_value(profile.get("country", "")) or "United States"
+    selects = page.locator("select")
+    try:
+        select_count = min(selects.count(), 40)
+    except PlaywrightTimeoutError:
+        select_count = 0
+    for index in range(select_count):
+        select = selects.nth(index)
+        try:
+            if not select.is_visible():
+                continue
+            context = f"{attr_blob(select)} {associated_label_text(page, select)}"
+            if looks_like(context, FIELD_ALIASES["country"]) and select_native_option(
+                select, ("united states", "usa", "us")
+            ):
+                print("  selected country United States")
+                break
+        except Exception:
+            continue
+    else:
+        fill_by_aliases(page, FIELD_ALIASES["country"], country)
 
 
 def fill_education(page: Target, profile: dict[str, Any]) -> None:
@@ -1045,7 +1330,7 @@ def run(
                 f"[*] Submitting {job.company if job else 'listing'} — "
                 f"{job.title if job else ''}."
             )
-            submitted = submit_filled_application(page)
+            submitted = submit_filled_application(page, profile)
             if submitted:
                 if job is not None:
                     _sync_after_approval(job)

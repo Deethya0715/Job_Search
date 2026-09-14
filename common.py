@@ -15,7 +15,11 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from zoneinfo import ZoneInfo
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # Streamlit Cloud if python-dotenv did not install
+    def load_dotenv(*_args: Any, **_kwargs: Any) -> bool:
+        return False
 
 ROOT = Path(__file__).resolve().parent
 PROFILE_PATH = ROOT / "profile.json"
@@ -36,7 +40,10 @@ load_dotenv(ENV_PATH)
 
 DEFAULT_SALARY_FLOOR = 150_000
 DEFAULT_MIN_MATCH_SCORE = 40.0
-LOCAL_TZ = ZoneInfo("America/Chicago")
+try:
+    LOCAL_TZ = ZoneInfo("America/Chicago")
+except Exception:
+    LOCAL_TZ = timezone.utc
 GOOGLE_SHEETS_ID_DEFAULT = "1TO5rtMymBoo64X2bld2R-HqBGlWim_m7kHNcHkICtxY"
 
 # fill_status values used across aggregator, bot, tracker, and the dashboard.
