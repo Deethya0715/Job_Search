@@ -26,6 +26,7 @@ from playwright.sync_api import Frame, Locator, Page, Playwright, sync_playwrigh
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from common import (
+    ANSWERS_PATH,
     MATCHES_PATH,
     PROFILE_PATH,
     STATUS_APPLIED,
@@ -42,6 +43,7 @@ from common import (
     enqueue_for_prep,
     find_match,
     is_automatable_apply_url,
+    load_json,
     load_match_jobs,
     load_profile,
     playwright_headless,
@@ -149,16 +151,44 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "location": (
         "current location",
         "current city",
+        "city of residence",
         "where are you located",
+        "where are you based",
+        "where do you live",
+        "where do you currently live",
+        "where do you reside",
         "your location",
+        "your city",
+        "home city",
+        "hometown",
         "city and state",
+        "city/state",
+        "what city",
+        "which city",
+        "candidate location",
+        "applicant location",
+        "located in",
     ),
     "country": ("country", "country of residence", "country/region"),
     "languages": (
-        "languages",
-        "language(s)",
-        "spoken language",
+        "language skills",
         "languages spoken",
+        "spoken language",
+        "languages you speak",
+        "what languages",
+        "which languages",
+        "fluent language",
+        "language(s)",
+        "languages",
+        "bilingual",
+        "multilingual",
+        "native language",
+        "native tongue",
+        "additional language",
+        "second language",
+        "other language",
+        "language proficiency",
+        "linguistic",
     ),
 }
 
@@ -551,7 +581,11 @@ def answer_hear_about(page: Page) -> int:
     return answered
 
 
-def submit_filled_application(page: Page, profile: dict[str, Any] | None = None) -> bool:
+def submit_filled_application(
+    page: Page,
+    profile: dict[str, Any] | None = None,
+    job: JobPosting | None = None,
+) -> bool:
     """Click Continue/Next through multi-step ATS forms, then Submit."""
     for step in range(8):
         dismiss_cookie_banners(page)
@@ -567,7 +601,7 @@ def submit_filled_application(page: Page, profile: dict[str, Any] | None = None)
                 pass
             time.sleep(0.8)
             if profile is not None:
-                fill_application(page, profile)
+                fill_application(page, profile, job)
             continue
 
         if not click_submit_control(page):
@@ -728,6 +762,160 @@ def fill_by_aliases(page: Target, aliases: tuple[str, ...], value: str) -> bool:
             print(f"  filled field matching {aliases[0]!r}")
             return True
     return False
+
+
+LOCATION_SKIP_BITS = (
+    "relocat",
+    "job location",
+    "role location",
+    "office location",
+    "this job",
+    "this role",
+    "position location",
+)
+
+
+def candidate_location_values(profile: dict[str, Any]) -> tuple[str, str]:
+    city = usable_profile_value(profile.get("city", "")) or "McKinney"
+    location = (
+        usable_profile_value(profile.get("location", "")) or f"{city}, TX, United States"
+    )
+    if "dallas" in city.lower():
+        city = "McKinney"
+    if "dallas" in location.lower():
+        location = "McKinney, TX, United States"
+    return city, location
+
+
+def is_candidate_location_question(text: str) -> bool:
+    blob = " ".join((text or "").lower().split())
+    if not blob or any(bit in blob for bit in LOCATION_SKIP_BITS):
+        return False
+    if looks_like(blob, FIELD_ALIASES["location"]):
+        return True
+    if blob.rstrip(" *:") in {"location", "city"}:
+        return True
+    if blob.startswith("location") or blob.startswith("city"):
+        return "job" not in blob and "role" not in blob
+    return False
+
+
+def fill_location_control(page: Target, control: Locator, city: str, location: str) -> bool:
+    """Fill a location/city input, including typeaheads that need a list pick."""
+    blob = f"{attr_blob(control)} {associated_label_text(page, control)}"
+    short = city
+    try:
+        current = (control.input_value(timeout=1_000) or "").strip()
+    except Exception:
+        current = ""
+    if current and "mckinney" in current.lower():
+        return False
+    try:
+        control.scroll_into_view_if_needed()
+        control.click(timeout=2_000)
+        control.fill(short)
+        time.sleep(0.45)
+    except Exception:
+        return fill_if_empty(control, location)
+
+    option_pat = re.compile(rf"{re.escape(city)}", re.I)
+    try:
+        option = first_visible(page.get_by_role("option", name=option_pat))
+        if option:
+            option.click(timeout=2_000)
+            print(f"  selected location option matching {city!r}")
+            return True
+    except Exception:
+        pass
+    try:
+        suggestion = first_visible(
+            page.locator("[role='option'], .select__option, li[class*='option']").filter(
+                has_text=option_pat
+            )
+        )
+        if suggestion:
+            suggestion.click(timeout=2_000)
+            print(f"  clicked location suggestion matching {city!r}")
+            return True
+    except Exception:
+        pass
+    try:
+        control.press("Enter")
+        time.sleep(0.2)
+        print(f"  typed location {short!r}")
+        return True
+    except Exception:
+        return fill_if_empty(control, location)
+
+
+def fill_candidate_location(page: Target, profile: dict[str, Any]) -> None:
+    city, location = candidate_location_values(profile)
+    filled = False
+
+    selectors = (
+        "input[autocomplete='address-level2']",
+        "input[name*='location' i]",
+        "input[id*='location' i]",
+        "input[placeholder*='location' i]",
+        "input[name*='city' i]",
+        "input[id*='city' i]",
+        "input[placeholder*='city' i]",
+        "input[placeholder*='Current location' i]",
+    )
+    for selector in selectors:
+        target = first_visible(visible_locator(page, selector))
+        if not target:
+            continue
+        blob = f"{attr_blob(target)} {associated_label_text(page, target)}"
+        if any(bit in blob for bit in LOCATION_SKIP_BITS):
+            continue
+        if fill_location_control(page, target, city, location):
+            print(f"  filled location via {selector}")
+            filled = True
+
+    controls = page.locator(
+        "input:not([type='hidden']):not([type='file']):not([type='submit']):not([type='button']), "
+        "textarea, [role='combobox']"
+    )
+    try:
+        total = min(controls.count(), 80)
+    except PlaywrightTimeoutError:
+        total = 0
+    for index in range(total):
+        control = controls.nth(index)
+        try:
+            if not control.is_visible():
+                continue
+        except Exception:
+            continue
+        blob = f"{attr_blob(control)} {associated_label_text(page, control)}"
+        if not is_candidate_location_question(blob):
+            continue
+        if fill_location_control(page, control, city, location):
+            print(f"  filled location question matching {blob[:60]!r}")
+            filled = True
+
+    selects = page.locator("select")
+    try:
+        select_count = min(selects.count(), 40)
+    except PlaywrightTimeoutError:
+        select_count = 0
+    for index in range(select_count):
+        select = selects.nth(index)
+        try:
+            if not select.is_visible():
+                continue
+            context = f"{attr_blob(select)} {associated_label_text(page, select)}"
+            if not is_candidate_location_question(context):
+                continue
+            if select_native_option(select, (city.lower(), "mckinney")):
+                print("  selected location McKinney")
+                filled = True
+        except Exception:
+            continue
+
+    if not filled:
+        fill_by_aliases(page, FIELD_ALIASES["location"], location)
 
 
 def upload_resume(page: Target, resume_path: str) -> bool:
@@ -996,18 +1184,7 @@ def fill_common_identity(page: Target, profile: dict[str, Any]) -> None:
         website,
     )
 
-    location = usable_profile_value(profile.get("location", ""))
-    try_fill_selectors(
-        page,
-        [
-            "input[name*='location' i]",
-            "input[id*='location' i]",
-            "input[placeholder*='location' i]",
-            "input[placeholder*='city' i]",
-            "input[autocomplete='address-level2']",
-        ],
-        location,
-    ) or fill_by_aliases(page, FIELD_ALIASES["location"], location)
+    fill_candidate_location(page, profile)
 
     country = usable_profile_value(profile.get("country", "")) or "United States"
     selects = page.locator("select")
@@ -1048,11 +1225,173 @@ def fill_skills(page: Target, profile: dict[str, Any]) -> None:
 
 
 def fill_languages(page: Target, profile: dict[str, Any]) -> None:
-    languages = profile.get("languages") or []
+    languages = [str(item).strip() for item in (profile.get("languages") or []) if str(item).strip()]
     if not languages:
-        return
-    value = ", ".join(str(item) for item in languages)
-    fill_by_aliases(page, FIELD_ALIASES["languages"], value)
+        languages = ["English", "Telugu"]
+    if not any(item.lower() == "english" for item in languages):
+        languages.insert(0, "English")
+    if not any(item.lower() == "telugu" for item in languages):
+        languages.append("Telugu")
+    wanted = tuple(item.lower() for item in languages)
+    value = ", ".join(languages)
+    answered = 0
+
+    skip_bits = (
+        "programming",
+        "coding",
+        "python",
+        "javascript",
+        "form language",
+        "page language",
+        "this application",
+        "preferred language for",
+        "resume language",
+    )
+
+    def is_language_question(text: str) -> bool:
+        blob = " ".join((text or "").lower().split())
+        if not blob or any(bit in blob for bit in skip_bits):
+            return False
+        if looks_like(blob, FIELD_ALIASES["languages"]):
+            return True
+        return blob.rstrip(" *:") in {"language", "languages"}
+
+    def slot_value(blob: str) -> str:
+        lowered = blob.lower()
+        if any(token in lowered for token in ("2", "second", "additional", "other", "another")):
+            return languages[1] if len(languages) > 1 else languages[0]
+        if any(token in lowered for token in ("1", "first", "primary", "native")):
+            return languages[0]
+        return value
+
+    def pick_language_options(select: Locator) -> int:
+        picked: list[str] = []
+        try:
+            options = select.locator("option")
+            for index in range(options.count()):
+                option = options.nth(index)
+                label = (option.inner_text() or "").strip()
+                option_value = (option.get_attribute("value") or "").strip()
+                combined = f"{label} {option_value}".lower()
+                if option_value.lower() in {"en", "eng", "en-us", "en_us", "te", "tel", "te-in", "te_in"}:
+                    picked.append(option_value or label)
+                    continue
+                if any(lang in combined for lang in wanted):
+                    picked.append(option_value or label)
+        except Exception:
+            return 0
+        if not picked:
+            return 0
+        unique = list(dict.fromkeys(picked))
+        try:
+            if select.get_attribute("multiple") is not None:
+                select.select_option(value=unique)
+                return len(unique)
+            select.select_option(value=unique[0])
+            return 1
+        except Exception:
+            try:
+                select.select_option(label=unique[0])
+                return 1
+            except Exception:
+                return 0
+
+    selects = page.locator("select")
+    try:
+        select_count = min(selects.count(), 80)
+    except PlaywrightTimeoutError:
+        select_count = 0
+    for index in range(select_count):
+        select = selects.nth(index)
+        try:
+            if not select.is_visible():
+                continue
+            context = f"{attr_blob(select)} {associated_label_text(page, select)}"
+            if not is_language_question(context):
+                continue
+            hits = pick_language_options(select)
+            if hits:
+                print(f"  selected {hits} language option(s)")
+                answered += hits
+        except Exception:
+            continue
+
+    groups = page.locator(
+        "fieldset, [role='group'], .field, .form-group, .application-question, .question"
+    )
+    try:
+        group_count = min(groups.count(), 120)
+    except PlaywrightTimeoutError:
+        group_count = 0
+    for index in range(group_count):
+        group = groups.nth(index)
+        try:
+            text = " ".join((group.inner_text() or "").split()).lower()
+        except Exception:
+            continue
+        if not is_language_question(text):
+            continue
+        for lang in wanted:
+            if click_matching_choice(group, (lang,)):
+                answered += 1
+                print(f"  checked language {lang}")
+
+    controls = page.locator(
+        "input:not([type='hidden']):not([type='file']):not([type='submit']):not([type='button']):not([type='checkbox']):not([type='radio']), "
+        "textarea, [role='combobox']"
+    )
+    try:
+        total = min(controls.count(), 80)
+    except PlaywrightTimeoutError:
+        total = 0
+    for index in range(total):
+        control = controls.nth(index)
+        try:
+            if not control.is_visible():
+                continue
+        except Exception:
+            continue
+        blob = f"{attr_blob(control)} {associated_label_text(page, control)}"
+        if not is_language_question(blob):
+            continue
+        typed = slot_value(blob)
+        try:
+            current = (control.input_value(timeout=1_000) or "").strip().lower()
+        except Exception:
+            current = ""
+        if current and "english" in current and "telugu" in current:
+            continue
+        try:
+            control.scroll_into_view_if_needed()
+            control.click(timeout=2_000)
+            role = (control.get_attribute("role") or "").lower()
+            if "combobox" in blob or role == "combobox":
+                for lang in languages:
+                    control.fill(lang)
+                    time.sleep(0.35)
+                    option = first_visible(
+                        page.get_by_role(
+                            "option", name=re.compile(rf"{re.escape(lang)}", re.I)
+                        )
+                    )
+                    if option:
+                        option.click(timeout=2_000)
+                        answered += 1
+                        print(f"  selected language typeahead {lang}")
+                    else:
+                        control.press("Enter")
+                        time.sleep(0.2)
+                        answered += 1
+            elif not current:
+                control.fill(typed)
+                print(f"  filled languages {typed!r}")
+                answered += 1
+        except Exception:
+            if fill_if_empty(control, typed):
+                answered += 1
+
+    if answered == 0:
+        fill_by_aliases(page, FIELD_ALIASES["languages"], value)
 
 
 def _through_month_index(profile: dict[str, Any]) -> int:
@@ -1129,7 +1468,127 @@ def fill_work_authorization(page: Target, profile: dict[str, Any]) -> None:
     print(f"  authorization matches: {yes_hits}, sponsorship matches: {no_hits}")
 
 
-def fill_application(page: Page, profile: dict[str, Any]) -> None:
+def _question_text_for_control(page: Target, control: Locator) -> str:
+    chunks = [associated_label_text(page, control), attr_blob(control)]
+    try:
+        ancestors = control.locator(
+            "xpath=ancestor::*[self::div or self::li or self::fieldset or self::section][position()<=3]"
+        )
+        total = min(ancestors.count(), 3)
+        for index in range(total):
+            text = " ".join((ancestors.nth(index).inner_text() or "").split())
+            if 24 < len(text) < 1400:
+                chunks.append(text)
+    except Exception:
+        pass
+    return " ".join(chunks).lower()
+
+
+def _format_bank_answer(template: str, profile: dict[str, Any], job: JobPosting | None) -> str:
+    company = job.company if job else "this team"
+    title = job.title if job else "this role"
+    return template.format(
+        company=company,
+        title=title,
+        name=profile.get("full_name") or "Deethya Janjanam",
+        school=profile.get("school") or "The University of Texas at Dallas",
+    )
+
+
+def _job_looks_like_fdse(job: JobPosting | None) -> bool:
+    hay = " ".join(
+        [
+            (job.title if job else ""),
+            (job.best_url() if job else ""),
+        ]
+    ).lower()
+    return "forward deployed" in hay or "fdse" in hay
+
+
+def fill_essay_answers(page: Target, profile: dict[str, Any], job: JobPosting | None = None) -> None:
+    """Fill custom/essay questions from answers.json (Palantir-style prompts included)."""
+    bank = load_json(ANSWERS_PATH, {})
+    questions = bank.get("questions") or []
+    checkboxes = bank.get("checkboxes") or []
+    if not questions and not checkboxes:
+        return
+
+    filled_ids: set[str] = set()
+    controls = page.locator("textarea, input[type='text']")
+    try:
+        total = min(controls.count(), 80)
+    except PlaywrightTimeoutError:
+        total = 0
+
+    for index in range(total):
+        control = controls.nth(index)
+        try:
+            if not control.is_visible():
+                continue
+            current = (control.input_value(timeout=1_000) or "").strip()
+            if current:
+                continue
+        except Exception:
+            continue
+        blob = _question_text_for_control(page, control)
+        if len(blob) < 12:
+            continue
+        for item in questions:
+            qid = str(item.get("id") or "")
+            if qid in filled_ids:
+                continue
+            phrases = [str(p).lower() for p in (item.get("any") or []) if p]
+            if not phrases or not any(phrase in blob for phrase in phrases):
+                continue
+            if qid == "fdse_vs_swe":
+                template = (
+                    item.get("answer_fdse") if _job_looks_like_fdse(job) else item.get("answer_swe")
+                )
+            else:
+                template = item.get("answer")
+            if not template:
+                continue
+            text = _format_bank_answer(str(template), profile, job)
+            try:
+                control.scroll_into_view_if_needed()
+                control.fill(text)
+                print(f"  filled essay '{qid}'")
+                filled_ids.add(qid)
+                break
+            except Exception:
+                continue
+
+    for item in checkboxes:
+        phrases = [str(p).lower() for p in (item.get("any") or []) if p]
+        choose = tuple(str(c).lower() for c in (item.get("choose") or ["yes"]))
+        groups = page.locator(
+            "fieldset, [role='group'], .field, .form-group, .application-question, li, div"
+        )
+        try:
+            group_count = min(groups.count(), 180)
+        except PlaywrightTimeoutError:
+            group_count = 0
+        for index in range(group_count):
+            group = groups.nth(index)
+            try:
+                if not group.is_visible():
+                    continue
+                text = " ".join((group.inner_text() or "").split()).lower()
+            except Exception:
+                continue
+            if len(text) < 20 or len(text) > 600:
+                continue
+            if not any(phrase in text for phrase in phrases):
+                continue
+            if click_matching_choice(group, choose):
+                print(f"  checked '{item.get('id')}'")
+                break
+
+    if filled_ids:
+        print(f"  essay bank filled {len(filled_ids)} question(s): {', '.join(sorted(filled_ids))}")
+
+
+def fill_application(page: Page, profile: dict[str, Any], job: JobPosting | None = None) -> None:
     """Fill the main document and any Greenhouse/Lever iframe."""
     roots = application_roots(page)
     print("[*] Filling identity fields...")
@@ -1161,25 +1620,29 @@ def fill_application(page: Page, profile: dict[str, Any]) -> None:
     for root in roots:
         fill_offer_deadlines(root, profile)
 
+    print("[*] Filling essay / custom questions from answers.json...")
+    for root in roots:
+        fill_essay_answers(root, profile, job)
 
-def fill_greenhouse(page: Page, profile: dict[str, Any]) -> None:
+
+def fill_greenhouse(page: Page, profile: dict[str, Any], job: JobPosting | None = None) -> None:
     print("[*] Detected Greenhouse application.")
-    fill_application(page, profile)
+    fill_application(page, profile, job)
 
 
-def fill_lever(page: Page, profile: dict[str, Any]) -> None:
+def fill_lever(page: Page, profile: dict[str, Any], job: JobPosting | None = None) -> None:
     print("[*] Detected Lever application.")
-    fill_application(page, profile)
+    fill_application(page, profile, job)
 
 
-def fill_ashby(page: Page, profile: dict[str, Any]) -> None:
+def fill_ashby(page: Page, profile: dict[str, Any], job: JobPosting | None = None) -> None:
     print("[*] Detected Ashby application.")
-    fill_application(page, profile)
+    fill_application(page, profile, job)
 
 
-def fill_generic(page: Page, profile: dict[str, Any]) -> None:
+def fill_generic(page: Page, profile: dict[str, Any], job: JobPosting | None = None) -> None:
     print("[*] Unknown ATS — using generic field matching.")
-    fill_application(page, profile)
+    fill_application(page, profile, job)
 
 
 def warn_if_walled_garden(ats: str) -> None:
@@ -1323,14 +1786,14 @@ def run(
             "generic": fill_generic,
         }
         warn_if_walled_garden(ats)
-        handlers.get(ats, fill_generic)(page, profile)
+        handlers.get(ats, fill_generic)(page, profile, job)
 
         if auto_submit_enabled():
             bot_notify(
                 f"[*] Submitting {job.company if job else 'listing'} — "
                 f"{job.title if job else ''}."
             )
-            submitted = submit_filled_application(page, profile)
+            submitted = submit_filled_application(page, profile, job)
             if submitted:
                 if job is not None:
                     _sync_after_approval(job)

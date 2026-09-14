@@ -1,0 +1,122 @@
+{
+  "internship": {
+    "company": "CBRE",
+    "title": "Software Engineering Intern",
+    "location": "Dallas, TX",
+    "when": "Summer 2026 (June–August)"
+  },
+  "questions": [
+    {
+      "id": "fdse_vs_swe",
+      "any": [
+        "forward deployed software engineer",
+        "fdse and swe",
+        "which of these roles resonates",
+        "dev versus delta",
+        "two main software engineering roles"
+      ],
+      "answer_swe": "The Software Engineer role resonates most with my search. I want to build the product itself — APIs, data platforms, and reliable full-stack systems — the same way I architected the Hope. Cope. Heal. EHR (Nuxt, Prisma) and SignalSafe’s real-time sensor pipeline. I like owning a codebase that many users depend on, not embedding with a single customer deployment. I am applying to the Software Engineer track, not FDSE.",
+      "answer_fdse": "Forward Deployed Software Engineer resonates most. At CBRE I sat inside a real legal-ops workflow (ServiceNow, Now Assist, ATF) and shipped tools operators actually click. EPICS was the same pattern: a clinic, a messy intake process, software that had to work on day one. I want that loop — understand the mission, then write production code beside the people who use it."
+    },
+    {
+      "id": "why_company",
+      "any": [
+        "why do you want to work",
+        "why this company",
+        "why do you want to join",
+        "what excites you",
+        "most exciting",
+        "why are you interested",
+        "what interests you about",
+        "why our company",
+        "why palantir"
+      ],
+      "answer": "I’m excited by {company} because the work is software that has to hold up in the real world, not a demo. I gravitate to platforms that turn messy operational data into decisions — the same problem I hit building an AI legal-request classifier at CBRE and a multi-role EHR for a clinic. I want to spend my new-grad years writing production Python/TypeScript, owning APIs and data paths, and shipping systems that people on the ground actually use. {company} is where I can do that at scale."
+    },
+    {
+      "id": "daily_life_problem",
+      "any": [
+        "solve any problem that impacts your daily life",
+        "problem that impacts your daily",
+        "everyday problem",
+        "problem in your daily life",
+        "what problem would you solve"
+      ],
+      "answer": "Missed or late turn signals. Drivers around me (and I) still forget them in the last second before a lane change, which is how a lot of Dallas-area near-misses start. I would solve it the way I started SignalSafe: fuse phone accelerometer, gyro, and GPS, detect an intended turn or merge from motion, and nudge the driver before the maneuver — no extra hardware, no car API. I already filed U.S. Provisional Patent 64/132,977 on that approach. The product version is a lightweight on-device model plus a map-matched warning, not another dashboard camera."
+    },
+    {
+      "id": "not_on_resume",
+      "any": [
+        "not on your resume",
+        "not on resume",
+        "proud of that isn't",
+        "something you're proud of",
+        "tell us one thing that's not"
+      ],
+      "answer": "I’m proud of being the default translator and form-helper for my family — Telugu at home, English for clinics, banks, and school paperwork. It isn’t a bullet on my resume, but it’s why I care about software that doesn’t assume everyone already knows the process. Hope. Cope. Heal. came from that: make intake obvious so a patient isn’t guessing. It’s also why I write Knowledge Base guides the way I did at CBRE — if L1.5 can’t diagnose it, the tool failed the human, not the other way around."
+    },
+    {
+      "id": "internship",
+      "any": [
+        "internship for summer 2026",
+        "summer 2026",
+        "internship this summer",
+        "current internship",
+        "confirm with what company",
+        "usg internship"
+      ],
+      "answer": "Yes. Software Engineering Intern at CBRE in Dallas, TX, June–August 2026 (platform engineering / ServiceNow, GenAI classification, ATF)."
+    },
+    {
+      "id": "why_role",
+      "any": [
+        "why this role",
+        "why are you applying",
+        "why this position",
+        "why software engineer"
+      ],
+      "answer": "I’m applying to {title} because it matches how I already work: full-stack product plus production ops. CBRE intern work, the EPICS EHR, and SignalSafe are all “ship something someone else has to use.” I want that as a new-grad SWE at {company}, with Python, TypeScript, and real data systems, not a research-only or internship-only loop."
+    },
+    {
+      "id": "greatest_strength",
+      "any": [
+        "greatest strength",
+        "biggest strength",
+        "what are your strengths"
+      ],
+      "answer": "I turn messy operational workflows into working software quickly. At CBRE I mapped legal intake into ServiceNow routing and an AI classifier; in EPICS I took clinic intake to a Nuxt/Prisma app with real roles. I don’t stop at a prototype — I add tests (ATF), docs, and the unglamorous integration work so someone else can run it."
+    },
+    {
+      "id": "challenge",
+      "any": [
+        "biggest challenge",
+        "difficult problem you solved",
+        "tell us about a challenge",
+        "obstacle you overcame"
+      ],
+      "answer": "Getting SignalSafe to detect a turn intent from phone sensors without a car CAN bus. GPS lag and noisy IMU data made naive thresholds fire all the time. I combined spatial map-matching with accelerometer/gyro windows so the nudge only fires when motion and road geometry agree. That’s the core of provisional patent 64/132,977, and it taught me to treat sensor fusion as a product constraint, not a lab demo."
+    },
+    {
+      "id": "additional_info",
+      "any": [
+        "anything else",
+        "additional information",
+        "other information you'd like",
+        "cover letter"
+      ],
+      "answer": "UT Dallas CS, graduating December 2026. U.S. citizen, no sponsorship. Summer 2026 intern at CBRE (Dallas). I file and build: U.S. Provisional Patent 64/132,977 (SignalSafe), Salesforce AI certs, and production ServiceNow/TypeScript/Python work. GitHub: github.com/Deethya0715."
+    }
+  ],
+  "checkboxes": [
+    {
+      "id": "confirm_role_match",
+      "any": [
+        "confirm that your answer",
+        "matches the role you are applying",
+        "different applications",
+        "fdse and swe roles have different"
+      ],
+      "choose": ["yes"]
+    }
+  ]
+}
