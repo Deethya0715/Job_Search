@@ -146,6 +146,41 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "graduation date",
         "grad date",
         "expected graduation",
+        "expected grad",
+    ),
+    "graduation_year": (
+        "graduation year",
+        "year of graduation",
+        "grad year",
+        "expected graduation year",
+        "year you will graduate",
+        "year you'll graduate",
+    ),
+    "graduation_month": (
+        "graduation month",
+        "month of graduation",
+        "grad month",
+        "expected graduation month",
+        "month you will graduate",
+    ),
+    "age": (
+        "age",
+        "years of age",
+        "how old are you",
+        "your age",
+        "current age",
+    ),
+    "current_employer": (
+        "current company",
+        "current employer",
+        "current workplace",
+        "present employer",
+        "where are you working",
+        "where do you work now",
+        "who do you work for",
+        "current organization",
+        "currently employed at",
+        "current place of employment",
     ),
     "skills": ("skills", "technical skills", "key skills"),
     "location": (
@@ -236,10 +271,45 @@ SPONSOR_NO_LABELS = (
     "visa sponsorship",
     "require sponsorship",
     "require visa",
+    "need sponsorship",
+    "now, or will you in the future",
+    "extend or renew",
     "future require",
     "immigration sponsorship",
     "h-1b",
     "h1b",
+    "work visa",
+    "sponsor your",
+)
+
+PREVIOUS_EMPLOYEE_LABELS = (
+    "previously employed",
+    "former employee",
+    "previously worked",
+    "have you worked",
+    "have you ever worked",
+    "already work",
+    "already worked",
+    "worked at this company",
+    "worked for this company",
+    "worked for us",
+    "current or former employee",
+    "ever been employed",
+    "prior employee",
+    "ex-employee",
+    "interned here",
+    "interned with us",
+)
+
+AGE_18_YES_LABELS = (
+    "at least 18",
+    "18 years of age or older",
+    "18 years or older",
+    "over 18",
+    "older than 18",
+    "18 or older",
+    "age of 18",
+    "are you 18",
 )
 
 
@@ -973,6 +1043,67 @@ def select_native_option(select: Locator, wanted: tuple[str, ...]) -> bool:
     return False
 
 
+def select_yes_no_option(select: Locator, answer: str) -> bool:
+    """Pick Yes/No without matching the letters 'no' inside 'not' / 'know'."""
+    target = "yes" if answer == "yes" else "no"
+    try:
+        options = select.locator("option")
+        exact = None
+        prefix = None
+        for index in range(options.count()):
+            option = options.nth(index)
+            label = (option.inner_text() or "").strip()
+            value = (option.get_attribute("value") or "").strip()
+            text = (label or value).strip().lower().rstrip(".")
+            if text in {target, f"{target}."} or text == ("true" if target == "yes" else "false"):
+                try:
+                    select.select_option(label=label)
+                except Exception:
+                    select.select_option(value=value or label)
+                return True
+            if text.startswith(f"{target},") or text.startswith(f"{target} "):
+                prefix = prefix or (label, value)
+        if prefix:
+            label, value = prefix
+            try:
+                select.select_option(label=label)
+            except Exception:
+                select.select_option(value=value or label)
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def pick_dropdown_value(page: Target, control: Locator, tokens: tuple[str, ...]) -> bool:
+    """Native <select> first, then click a custom Select… combobox."""
+    try:
+        tag = (control.evaluate("el => el.tagName") or "").lower()
+    except Exception:
+        tag = ""
+    if tag == "select":
+        if "yes" in tokens or "no" in tokens:
+            yn = "yes" if "yes" in tokens else "no"
+            if select_yes_no_option(control, yn):
+                return True
+        elif select_native_option(control, tokens):
+            return True
+    try:
+        control.scroll_into_view_if_needed()
+        control.click(timeout=2_000)
+        time.sleep(0.35)
+    except Exception:
+        return False
+    for token in tokens:
+        pattern = re.compile(rf"^{re.escape(token)}$", re.I)
+        option = first_visible(page.get_by_role("option", name=pattern))
+        if not option:
+            option = first_visible(page.get_by_text(pattern))
+        if option and _click_locator(option):
+            return True
+    return False
+
+
 def click_matching_choice(container: Locator, wanted: tuple[str, ...]) -> bool:
     """Click a radio/checkbox/option whose label matches one of the tokens."""
     choices = container.locator("label, [role='radio'], [role='option'], option")
@@ -1005,8 +1136,8 @@ def answer_yes_no_question(page: Target, question_aliases: tuple[str, ...], answ
     """
     answered = 0
     wanted = ("yes", "true") if answer == "yes" else ("no", "false")
+    yn = "yes" if answer == "yes" else "no"
 
-    # Native <select> controls whose surrounding text matches the question.
     selects = page.locator("select")
     try:
         select_count = selects.count()
@@ -1018,13 +1149,30 @@ def answer_yes_no_question(page: Target, question_aliases: tuple[str, ...], answ
         try:
             if not select.is_visible():
                 continue
-            context = f"{attr_blob(select)} {associated_label_text(page, select)}"
-            if looks_like(context, question_aliases) and select_native_option(select, wanted):
+            context = _question_text_for_control(page, select)
+            if looks_like(context, question_aliases) and select_yes_no_option(select, yn):
                 answered += 1
         except Exception:
             continue
 
-    # Fieldsets / question cards that contain radios or checkboxes.
+    combos = page.locator("[role='combobox'], button:has-text('Select')")
+    try:
+        combo_count = min(combos.count(), 40)
+    except Exception:
+        combo_count = 0
+    for index in range(combo_count):
+        combo = combos.nth(index)
+        try:
+            if not combo.is_visible():
+                continue
+            context = _question_text_for_control(page, combo)
+            if not looks_like(context, question_aliases):
+                continue
+            if pick_dropdown_value(page, combo, (yn,)):
+                answered += 1
+        except Exception:
+            continue
+
     groups = page.locator(
         "fieldset, [role='group'], .application-question, .question, "
         ".select__control, [data-testid*='question'], .field, .form-group, "
@@ -1044,15 +1192,21 @@ def answer_yes_no_question(page: Target, question_aliases: tuple[str, ...], answ
             text = " ".join((group.inner_text() or "").split()).lower()
         except Exception:
             continue
-        if len(text) < 12 or len(text) > 400:
+        if len(text) < 12 or len(text) > 900:
             continue
         if not looks_like(text, question_aliases):
             continue
-        fingerprint = text[:120]
+        fingerprint = text[:160]
         if fingerprint in seen:
             continue
         seen.add(fingerprint)
         if click_matching_choice(group, wanted):
+            answered += 1
+            continue
+        dropdown = first_visible(
+            group.locator("select, [role='combobox'], button, [class*='select']")
+        )
+        if dropdown and pick_dropdown_value(page, dropdown, (yn,)):
             answered += 1
 
     return answered
@@ -1212,9 +1366,90 @@ def fill_common_identity(page: Target, profile: dict[str, Any]) -> None:
 def fill_education(page: Target, profile: dict[str, Any]) -> None:
     fill_by_aliases(page, FIELD_ALIASES["school"], profile.get("school", ""))
     fill_by_aliases(page, FIELD_ALIASES["degree"], profile.get("degree", ""))
-    fill_by_aliases(
-        page, FIELD_ALIASES["graduation_date"], profile.get("graduation_date", "")
+    year = str(profile.get("graduation_year") or "2026")
+    month = str(profile.get("graduation_month") or "December")
+    month_num = str(profile.get("graduation_month_number") or "12")
+    fill_by_aliases(page, FIELD_ALIASES["graduation_date"], f"{month} {year}")
+    fill_by_aliases(page, FIELD_ALIASES["graduation_year"], year)
+    fill_by_aliases(page, FIELD_ALIASES["graduation_month"], month)
+
+    selects = page.locator("select")
+    try:
+        select_count = min(selects.count(), 80)
+    except PlaywrightTimeoutError:
+        select_count = 0
+    for index in range(select_count):
+        select = selects.nth(index)
+        try:
+            if not select.is_visible():
+                continue
+            context = _question_text_for_control(page, select)
+            if looks_like(context, FIELD_ALIASES["graduation_year"]):
+                if select_native_option(select, (year,)):
+                    print(f"  selected graduation year {year}")
+            elif looks_like(context, FIELD_ALIASES["graduation_month"]):
+                if select_native_option(select, (month.lower(), month_num, "dec")):
+                    print(f"  selected graduation month {month}")
+            elif looks_like(context, FIELD_ALIASES["graduation_date"]):
+                if select_native_option(select, (month.lower(), month_num, year, "dec")):
+                    print("  selected graduation date")
+        except Exception:
+            continue
+
+
+def fill_structured_facts(
+    page: Target, profile: dict[str, Any], job: JobPosting | None = None
+) -> None:
+    """Age 18, current workplace N/A, prior employer only CBRE, 18+ = Yes."""
+    age = str(profile.get("age") or "18")
+    employer = usable_profile_value(profile.get("current_employer", "")) or "N/A"
+    prior = [str(item).lower() for item in (profile.get("prior_employers") or ["CBRE"])]
+    company = (job.company if job else "") or ""
+    worked_here = any(name and name in company.lower() for name in prior)
+
+    fill_by_aliases(page, FIELD_ALIASES["age"], age)
+    fill_by_aliases(page, FIELD_ALIASES["current_employer"], employer)
+
+    age_hits = answer_yes_no_question(page, AGE_18_YES_LABELS, "yes")
+    if age_hits:
+        print(f"  answered {age_hits} 18+ question(s) Yes")
+
+    prev_hits = answer_yes_no_question(
+        page, PREVIOUS_EMPLOYEE_LABELS, "yes" if worked_here else "no"
     )
+    if prev_hits:
+        print(
+            f"  previous-employee at {company or 'this company'}: "
+            f"{'Yes (CBRE)' if worked_here else 'No'}"
+        )
+
+    # Custom Select… widgets for current employer / age that aren't native.
+    controls = page.locator("select, [role='combobox'], input:not([type='hidden'])")
+    try:
+        total = min(controls.count(), 80)
+    except PlaywrightTimeoutError:
+        total = 0
+    for index in range(total):
+        control = controls.nth(index)
+        try:
+            if not control.is_visible():
+                continue
+        except Exception:
+            continue
+        blob = _question_text_for_control(page, control)
+        try:
+            tag = (control.evaluate("el => el.tagName") or "").lower()
+        except Exception:
+            tag = ""
+        if looks_like(blob, FIELD_ALIASES["graduation_year"]) and tag == "select":
+            select_native_option(control, ("2026",))
+        elif looks_like(blob, FIELD_ALIASES["graduation_month"]) and tag == "select":
+            select_native_option(control, ("december", "12", "dec"))
+        elif looks_like(blob, FIELD_ALIASES["current_employer"]):
+            if tag == "select":
+                select_native_option(control, ("n/a", "na", "none", "not applicable"))
+            else:
+                fill_if_empty(control, employer)
 
 
 def fill_skills(page: Target, profile: dict[str, Any]) -> None:
@@ -1457,14 +1692,10 @@ def fill_offer_deadlines(page: Target, profile: dict[str, Any]) -> None:
 def fill_work_authorization(page: Target, profile: dict[str, Any]) -> None:
     auth = profile.get("work_authorization") or {}
     authorized = bool(auth.get("authorized_to_work", True) or auth.get("us_citizen", True))
-    needs_sponsor = bool(auth.get("requires_sponsorship", False))
-
     yes_hits = answer_yes_no_question(
         page, AUTH_YES_LABELS, "yes" if authorized else "no"
     )
-    no_hits = answer_yes_no_question(
-        page, SPONSOR_NO_LABELS, "yes" if needs_sponsor else "no"
-    )
+    no_hits = answer_yes_no_question(page, SPONSOR_NO_LABELS, "no")
     print(f"  authorization matches: {yes_hits}, sponsorship matches: {no_hits}")
 
 
@@ -1615,6 +1846,10 @@ def fill_application(page: Page, profile: dict[str, Any], job: JobPosting | None
     print("[*] Answering work-authorization questions (best effort)...")
     for root in roots:
         fill_work_authorization(root, profile)
+
+    print("[*] Filling age / employer / graduation facts...")
+    for root in roots:
+        fill_structured_facts(root, profile, job)
 
     print("[*] Answering offer-deadline questions (best effort)...")
     for root in roots:

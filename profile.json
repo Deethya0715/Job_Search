@@ -13,6 +13,12 @@
     "through_month": "December"
   },
   "graduation_date": "December 2026",
+  "graduation_year": "2026",
+  "graduation_month": "December",
+  "graduation_month_number": "12",
+  "age": 18,
+  "current_employer": "N/A",
+  "prior_employers": ["CBRE"],
   "degree": "B.S. in Computer Science",
   "school": "The University of Texas at Dallas",
   "work_authorization": {
