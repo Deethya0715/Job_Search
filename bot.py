@@ -126,7 +126,6 @@ HEAR_ABOUT_ANSWERS = (
     "internet",
 )
 THANKS_HINTS = (
-    "thank you",
     "thanks for applying",
     "thanks for taking the time",
     "application received",
@@ -134,6 +133,7 @@ THANKS_HINTS = (
     "successfully submitted",
     "we received your application",
     "your application was sent",
+    "your application has been received",
 )
 
 # Human-readable field aliases used for label / name / placeholder matching.
@@ -211,6 +211,17 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "located in",
     ),
     "country": ("country", "country of residence", "country/region"),
+    "country_code": (
+        "country code",
+        "dial code",
+        "calling code",
+        "phone country",
+        "phone code",
+        "tel-country-code",
+        "country prefix",
+        "country calling",
+        "area code",
+    ),
     "languages": (
         "language skills",
         "languages spoken",
@@ -431,11 +442,37 @@ def form_fields_present(page: Page) -> bool:
     return False
 
 
+def _looks_like_submit(candidate: Locator) -> bool:
+    """True when a control would submit the application. Never click these while filling."""
+    try:
+        type_attr = (candidate.get_attribute("type") or "").lower()
+        ident = " ".join(
+            [
+                candidate.get_attribute("id") or "",
+                candidate.get_attribute("name") or "",
+                candidate.get_attribute("value") or "",
+                candidate.get_attribute("aria-label") or "",
+                candidate.inner_text() or "",
+            ]
+        ).lower()
+    except Exception:
+        return False
+    if type_attr == "submit":
+        return True
+    if "submit_app" in ident:
+        return True
+    if SUBMIT_PATTERN.search(ident):
+        return True
+    return any(deny in ident for deny in SUBMIT_TEXT_DENYLIST)
+
+
 def click_role_button(page: Page, pattern: re.Pattern[str]) -> bool:
     for root in application_roots(page):
         for role in ("button", "link"):
             candidate = first_visible(root.get_by_role(role, name=pattern))
             if not candidate:
+                continue
+            if pattern is CONTINUE_PATTERN and _looks_like_submit(candidate):
                 continue
             try:
                 candidate.scroll_into_view_if_needed(timeout=2_000)
@@ -494,15 +531,14 @@ def open_application_form(page: Page) -> None:
 
 
 def submission_looks_successful(page: Page) -> bool:
+    """True only on a confirmation page — never while the application form is still up."""
+    if form_fields_present(page):
+        return False
     try:
         text = " ".join((page.locator("body").inner_text(timeout=3_000) or "").lower().split())
     except Exception:
         text = ""
-    if any(hint in text for hint in THANKS_HINTS):
-        return True
-    if visible_invalid_fields(page):
-        return False
-    return False
+    return any(hint in text for hint in THANKS_HINTS)
 
 
 def visible_invalid_fields(page: Page) -> list[str]:
@@ -575,6 +611,7 @@ def click_submit_control(page: Page) -> bool:
 
 
 def click_continue_control(page: Page) -> bool:
+    """Click Continue/Next only. Never click a Submit control."""
     return click_role_button(page, CONTINUE_PATTERN)
 
 
@@ -782,6 +819,12 @@ def fill_if_empty(locator: Locator, value: str) -> bool:
     if _current_value(locator):
         return False
     try:
+        js_val = locator.evaluate("el => String(el.value || '').trim()")
+        if js_val:
+            return False
+    except Exception:
+        pass
+    try:
         locator.scroll_into_view_if_needed()
     except Exception:
         pass
@@ -943,7 +986,7 @@ def fill_location_control(page: Target, control: Locator, city: str, location: s
         current = (control.input_value(timeout=1_000) or "").strip()
     except Exception:
         current = ""
-    if current and "mckinney" in current.lower():
+    if current:
         return False
     try:
         control.scroll_into_view_if_needed()
@@ -974,13 +1017,8 @@ def fill_location_control(page: Target, control: Locator, city: str, location: s
             return True
     except Exception:
         pass
-    try:
-        control.press("Enter")
-        time.sleep(0.2)
-        print(f"  typed location {short!r}")
-        return True
-    except Exception:
-        return fill_if_empty(control, location)
+    print(f"  typed location {short!r} (left for you if the list did not open)")
+    return True
 
 
 def fill_candidate_location(page: Target, profile: dict[str, Any]) -> None:
@@ -1172,7 +1210,7 @@ def pick_dropdown_value(page: Target, control: Locator, tokens: tuple[str, ...])
         option = first_visible(page.get_by_role("option", name=pattern))
         if not option:
             option = first_visible(page.get_by_text(pattern))
-        if option and _click_locator(option):
+        if option and not _looks_like_submit(option) and _click_locator(option):
             return True
     return False
 
@@ -1309,16 +1347,15 @@ def answer_yes_no_question(page: Target, question_aliases: tuple[str, ...], answ
 
 
 def dismiss_cookie_banners(page: Target) -> None:
-    labels = ("Accept", "Accept all", "I agree", "Got it", "Close")
-    for label in labels:
-        button = first_visible(page.get_by_role("button", name=label, exact=False))
-        if button:
-            try:
-                button.click(timeout=1_500)
-                time.sleep(0.3)
-                return
-            except Exception:
-                continue
+    cookie_name = re.compile(r"^(accept( all)?|i agree|got it|close)$", re.I)
+    button = first_visible(page.get_by_role("button", name=cookie_name))
+    if not button or _looks_like_submit(button):
+        return
+    try:
+        button.click(timeout=1_500)
+        time.sleep(0.3)
+    except Exception:
+        return
 
 
 def assert_no_submit_clicked() -> None:
@@ -1329,6 +1366,241 @@ def assert_no_submit_clicked() -> None:
 # ---------------------------------------------------------------------------
 # ATS-specific fill strategies
 # ---------------------------------------------------------------------------
+
+US_DIAL_CODE = "+1"
+
+
+def _control_blob(page: Target, control: Locator) -> str:
+    return f"{attr_blob(control)} {associated_label_text(page, control)}"
+
+
+def select_us_country_option(select: Locator) -> bool:
+    """Prefer 'United States (+1)' without matching +1242-style NANP codes."""
+    try:
+        options = select.locator("option")
+        ranked: list[tuple[int, str, str]] = []
+        for index in range(options.count()):
+            option = options.nth(index)
+            label = (option.inner_text() or "").strip()
+            value = (option.get_attribute("value") or "").strip()
+            combined = f"{label} {value}".lower()
+            score = 0
+            if "united states" in combined and "minor" not in combined:
+                score = 3 if "+1" in combined else 2
+            elif re.search(r"(^|[^0-9])\+1([^0-9]|$)", combined) and not re.search(
+                r"\+1\d", combined
+            ):
+                score = 1
+            if score:
+                ranked.append((score, value, label))
+        if not ranked:
+            return False
+        ranked.sort(key=lambda item: -item[0])
+        value, label = ranked[0][1], ranked[0][2]
+        try:
+            select.select_option(value=value or label)
+        except Exception:
+            select.select_option(label=label)
+        return True
+    except Exception:
+        return False
+
+
+def _is_residence_country_question(text: str) -> bool:
+    blob = " ".join((text or "").lower().split())
+    return any(
+        bit in blob
+        for bit in ("residence", "residency", "citizenship", "nationality", "home country")
+    )
+
+
+def _is_phone_country_widget(text: str) -> bool:
+    blob = " ".join((text or "").lower().split())
+    if not blob or _is_residence_country_question(blob):
+        return False
+    if looks_like(blob, FIELD_ALIASES["country_code"]):
+        return True
+    if "country" in blob and any(
+        bit in blob for bit in ("phone", "mobile", "tel", "dial", "calling", "prefix")
+    ):
+        return True
+    if blob.rstrip(" *:") in {"country", "country code", "code"}:
+        return True
+    return False
+
+
+def _already_has_us_dial(control: Locator) -> bool:
+    bits = [_current_value(control)]
+    try:
+        bits.append(control.inner_text(timeout=800) or "")
+    except Exception:
+        pass
+    try:
+        bits.append(control.get_attribute("title") or "")
+        bits.append(control.get_attribute("aria-label") or "")
+        bits.append(control.get_attribute("value") or "")
+    except Exception:
+        pass
+    hay = " ".join(bits).lower()
+    if not hay.strip():
+        return False
+    if "united states" in hay or "+1" in hay:
+        # Avoid matching +1242-style codes unless US is named.
+        if "united states" in hay or "usa" in hay:
+            return True
+        return bool(re.search(r"(^|[^0-9])\+1([^0-9]|$)", hay))
+    return False
+
+
+def _pick_plus_one_option(page: Target) -> bool:
+    patterns = (
+        re.compile(r"united states.*\+1|\+1.*united states", re.I),
+        re.compile(r"^\s*\+1\s*$"),
+        re.compile(r"united states|usa", re.I),
+    )
+    for pattern in patterns:
+        try:
+            option = first_visible(page.get_by_role("option", name=pattern))
+        except Exception:
+            option = None
+        if option and not _looks_like_submit(option) and _click_locator(option):
+            return True
+        try:
+            option = first_visible(
+                page.locator(
+                    "[role='option'], li[class*='option'], .iti__country, "
+                    ".select__option, [data-testid*='option']"
+                ).filter(has_text=pattern)
+            )
+        except Exception:
+            option = None
+        if option and not _looks_like_submit(option) and _click_locator(option):
+            return True
+    return False
+
+
+def press_plus_one_on_control(page: Target, control: Locator) -> bool:
+    """Click a country/dial widget, type +1, and click the US option. Never press Enter."""
+    try:
+        if _already_has_us_dial(control) or _looks_like_submit(control):
+            return False
+        control.scroll_into_view_if_needed()
+        control.click(timeout=2_500)
+        time.sleep(0.25)
+    except Exception:
+        return False
+
+    search = first_visible(page.locator(".iti__search-input"))
+    typer = search
+    if typer is None:
+        own = attr_blob(control)
+        try:
+            tag = (control.evaluate("el => el.tagName") or "").lower()
+        except Exception:
+            tag = ""
+        if tag == "input" and (
+            looks_like(own, FIELD_ALIASES["country_code"]) or "country" in own
+        ):
+            typer = control
+    if typer is not None:
+        try:
+            typer.press_sequentially(US_DIAL_CODE, delay=25)
+        except Exception:
+            try:
+                typer.fill(US_DIAL_CODE)
+            except Exception:
+                typer = None
+        time.sleep(0.35)
+    if _pick_plus_one_option(page):
+        print("  selected country +1")
+        return True
+    try:
+        page.keyboard.press("Escape")
+    except Exception:
+        pass
+    if typer is not None:
+        print("  typed +1 on country (did not press Enter)")
+        return True
+    return False
+
+
+def fill_country_plus_one(page: Target, profile: dict[str, Any]) -> None:
+    """
+    Phone country-code widgets need +1, not the words 'United States'.
+    Type +1 and pick the matching option. Never press Enter (that submits the form).
+    Residence country dropdowns still select United States.
+    """
+    answered = 0
+
+    selects = page.locator("select")
+    try:
+        select_count = min(selects.count(), 50)
+    except PlaywrightTimeoutError:
+        select_count = 0
+    for index in range(select_count):
+        select = selects.nth(index)
+        try:
+            if not select.is_visible():
+                continue
+            context = _control_blob(page, select)
+            if not _is_phone_country_widget(context) and not looks_like(
+                context, FIELD_ALIASES["country"]
+            ):
+                continue
+            if select_us_country_option(select):
+                print("  selected country +1 / United States")
+                answered += 1
+        except Exception:
+            continue
+
+    widgets = page.locator(
+        "[role='combobox'], .iti__selected-flag, [class*='PhoneInputCountry'], "
+        "[aria-label*='country' i], button[aria-label*='country' i], "
+        "input[aria-label*='country' i], input[name*='country' i], input[id*='country' i]"
+    )
+    try:
+        total = min(widgets.count(), 80)
+    except PlaywrightTimeoutError:
+        total = 0
+    for index in range(total):
+        control = widgets.nth(index)
+        try:
+            if not control.is_visible():
+                continue
+        except Exception:
+            continue
+        blob = attr_blob(control)
+        label = associated_label_text(page, control)
+        if len(label) > 60:
+            label = label[:60]
+        blob = f"{blob} {label}"
+        try:
+            tag = (control.evaluate("el => el.tagName") or "").lower()
+            role = (control.get_attribute("role") or "").lower()
+        except Exception:
+            tag = ""
+            role = ""
+        if tag == "select":
+            continue
+        countryish = _is_phone_country_widget(blob) or looks_like(blob, FIELD_ALIASES["country"])
+        flag_only = "iti__" in blob or "phoneinputcountry" in blob.replace(" ", "")
+        if not countryish and not flag_only:
+            continue
+        if not flag_only and tag not in {"input", "button", "div", "span"} and role != "combobox":
+            continue
+        if _is_residence_country_question(blob) and tag in {"textarea"}:
+            continue
+        if _looks_like_submit(control):
+            continue
+        if press_plus_one_on_control(page, control):
+            answered += 1
+
+    if answered:
+        print(f"  country/dial-code +1 applied on {answered} widget(s)")
+
+    country = usable_profile_value(profile.get("country", "")) or "United States"
+    fill_by_aliases(page, FIELD_ALIASES["country"], country)
+
 
 def fill_common_identity(page: Target, profile: dict[str, Any]) -> None:
     first = usable_profile_value(profile.get("first_name", ""))
@@ -1435,28 +1707,7 @@ def fill_common_identity(page: Target, profile: dict[str, Any]) -> None:
     )
 
     fill_candidate_location(page, profile)
-
-    country = usable_profile_value(profile.get("country", "")) or "United States"
-    selects = page.locator("select")
-    try:
-        select_count = min(selects.count(), 40)
-    except PlaywrightTimeoutError:
-        select_count = 0
-    for index in range(select_count):
-        select = selects.nth(index)
-        try:
-            if not select.is_visible():
-                continue
-            context = f"{attr_blob(select)} {associated_label_text(page, select)}"
-            if looks_like(context, FIELD_ALIASES["country"]) and select_native_option(
-                select, ("united states", "usa", "us")
-            ):
-                print("  selected country United States")
-                break
-        except Exception:
-            continue
-    else:
-        fill_by_aliases(page, FIELD_ALIASES["country"], country)
+    fill_country_plus_one(page, profile)
 
 
 def fill_education(page: Target, profile: dict[str, Any]) -> None:
@@ -1692,7 +1943,7 @@ def fill_languages(page: Target, profile: dict[str, Any]) -> None:
             current = (control.input_value(timeout=1_000) or "").strip().lower()
         except Exception:
             current = ""
-        if current and "english" in current and "telugu" in current:
+        if current:
             continue
         try:
             control.scroll_into_view_if_needed()
@@ -1712,9 +1963,7 @@ def fill_languages(page: Target, profile: dict[str, Any]) -> None:
                         answered += 1
                         print(f"  selected language typeahead {lang}")
                     else:
-                        control.press("Enter")
-                        time.sleep(0.2)
-                        answered += 1
+                        print(f"  typed language {lang!r} — pick it in the list if needed")
             elif not current:
                 control.fill(typed)
                 print(f"  filled languages {typed!r}")
@@ -1958,12 +2207,8 @@ def fill_application(page: Page, profile: dict[str, Any], job: JobPosting | None
         fill_essay_answers(root, profile, job)
 
     if uploaded:
-        print("[*] Resume parse pause — filling leftover identity fields...")
-        time.sleep(0.8)
-        for root in roots:
-            fill_common_identity(root, profile)
-            fill_education(root, profile)
-            fill_structured_facts(root, profile, job)
+        print("[*] Waiting for resume parse — not touching filled fields again.")
+        time.sleep(1.2)
 
 
 def fill_greenhouse(page: Page, profile: dict[str, Any], job: JobPosting | None = None) -> None:
@@ -2026,41 +2271,20 @@ def _browser_alive(page: Page) -> bool:
 def fill_all_form_pages(
     page: Page, profile: dict[str, Any], job: JobPosting | None = None
 ) -> None:
-    """Fill the current page, click Continue/Next through extra steps, never Submit."""
-    seen: set[str] = set()
-    for step in range(8):
-        dismiss_cookie_banners(page)
-        fill_application(page, profile, job)
-        decline_self_identify(page)
-        check_consent_boxes(page)
-        answer_hear_about(page)
-
-        signature = _form_page_key(page)
-        seen.add(signature)
-        if step == 0 and not form_fields_present(page):
-            print("[warn] Could not find application fields. Leaving the page open for you.")
-            return
-        if not click_continue_control(page):
-            invalid = visible_invalid_fields(page)
-            if invalid:
-                preview = "; ".join(invalid[:6])
-                print(f"[*] Remaining blank/invalid fields (yours to edit): {preview}")
-            return
-        print(f"  advanced to next form page (step {step + 1}).")
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=8_000)
-        except PlaywrightTimeoutError:
-            pass
-        time.sleep(0.9)
-        new_sig = _form_page_key(page)
-        if new_sig == signature:
-            print(
-                "  Continue did not advance — required fields are still empty. "
-                "Leaving this page open for you."
-            )
-            return
-        if new_sig in seen:
-            return
+    """Fill visible fields once, then stop. Never Submit; never press Enter in inputs."""
+    dismiss_cookie_banners(page)
+    fill_application(page, profile, job)
+    decline_self_identify(page)
+    check_consent_boxes(page)
+    answer_hear_about(page)
+    if not form_fields_present(page):
+        print("[warn] Could not find application fields. Leaving the page open for you.")
+        return
+    invalid = visible_invalid_fields(page)
+    if invalid:
+        preview = "; ".join(invalid[:6])
+        print(f"[*] Remaining blank/invalid fields (yours to edit): {preview}")
+    print("[*] Fill pass finished. Waiting — will not Submit or clear the form.")
 
 
 # ---------------------------------------------------------------------------
@@ -2074,10 +2298,7 @@ def wait_for_human_finish(
 ) -> str:
     """
     Keep Chromium open on this one application until the human is done.
-
-    Next listing does not open until: thank-you page, dashboard button,
-    Enter in a terminal, or the window is closed.
-    While waiting, if the form advances to a new page, fill the new fields.
+    Does not fill again, does not click Submit, and does not open the next role.
     """
     company = job.company if job else "this listing"
     title = job.title if job else ""
@@ -2097,11 +2318,11 @@ def wait_for_human_finish(
             "In the Chromium window:",
             "  1. Check every auto-filled value (name, email, phone, links, resume).",
             "  2. Fill anything still blank. Change any answer that looks wrong.",
-            "  3. Click Continue yourself if another page of questions appears.",
-            "  4. Click Submit yourself when it looks right.",
+            "  3. Click Continue yourself if another page of questions appears — the bot will wait.",
+            "  4. Click Submit yourself when it looks right. The bot will not click Submit.",
             "",
             "When you are done, either:",
-            "  • Wait — a thank-you page is detected, then Sheets syncs and the next role opens",
+            "  • Wait — only a real confirmation page (form gone) counts as submitted",
             "  • Click a button in the Application Queue dashboard",
             "  • Press Enter in this terminal (if you launched the bot yourself)",
             "=" * 72,
@@ -2136,7 +2357,11 @@ def wait_for_human_finish(
     if sys.stdin.isatty():
         threading.Thread(target=_stdin_wait, daemon=True).start()
 
-    last_key = _form_page_key(page)
+    last_url = ""
+    try:
+        last_url = page.url or ""
+    except Exception:
+        pass
     while True:
         if not _browser_alive(page):
             bot_notify("[*] Browser closed. This role stays in the queue as ready for review.")
@@ -2174,17 +2399,16 @@ def wait_for_human_finish(
             )
             return STATUS_PREPPED
 
-        key = _form_page_key(page)
-        if key != last_key:
-            time.sleep(1.1)
-            key = _form_page_key(page)
-            if key != last_key and _browser_alive(page) and not submission_looks_successful(page):
-                bot_notify("[*] Form changed — filling new fields (won't overwrite what you typed).")
-                fill_application(page, profile, job)
-                decline_self_identify(page)
-                check_consent_boxes(page)
-                answer_hear_about(page)
-                last_key = _form_page_key(page)
+        try:
+            current_url = page.url or ""
+        except Exception:
+            current_url = last_url
+        if current_url != last_url and not submission_looks_successful(page):
+            last_url = current_url
+            bot_notify(
+                "[*] Page URL changed. Not auto-filling again — edit the new page yourself "
+                "or click Submit when ready."
+            )
 
         time.sleep(0.8)
 
@@ -2248,7 +2472,7 @@ def run(
         open_application_form(page)
 
         warn_if_walled_garden(ats)
-        print(f"[*] Filling {ats} application across all pages (Submit stays with you)...")
+        print(f"[*] Filling {ats} application (then waiting — will not Submit)...")
         fill_all_form_pages(page, profile, job)
 
         if auto_submit_enabled():
