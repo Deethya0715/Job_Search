@@ -144,9 +144,9 @@ def build_markdown(jobs: list[JobPosting], profile: dict) -> str:
     lines += [
         "---",
         "",
-        "This report never auto-submits applications. New $150k+ matches are "
-        "queued for Playwright automatically (`bot.py --auto-prep`), which fills "
-        "forms and pauses before Submit. Bulk-approve ready rows in the Streamlit "
+        "This report is a digest of the hunt. Greenhouse, Lever, and Ashby "
+        "matches are auto-applied when AUTO_SUBMIT=1 (`bot.py --auto-prep`). "
+        "Workday and other login portals stay skipped. Review the Streamlit "
         "Application Queue (`streamlit run app.py`).",
         "",
     ]

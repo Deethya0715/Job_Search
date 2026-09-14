@@ -404,12 +404,41 @@ def auto_prep_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def auto_submit_enabled() -> bool:
+    raw = env("AUTO_SUBMIT", "0").lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def playwright_headless() -> bool:
+    raw = env("PLAYWRIGHT_HEADLESS", "0").lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def auto_prep_limit() -> int:
     raw = env("AUTO_PREP_LIMIT", "0")
     try:
         return max(0, int(raw))
     except ValueError:
         return 0
+
+
+AUTO_APPLY_HOST_MARKERS = (
+    "greenhouse.io",
+    "lever.co",
+    "ashbyhq.com",
+)
+
+
+def is_automatable_apply_url(url: str) -> bool:
+    """True when Playwright can fill (and optionally submit) without a login wall."""
+    if not url:
+        return False
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    query = parsed.query.lower()
+    if "gh_jid=" in query:
+        return True
+    return any(marker in host for marker in AUTO_APPLY_HOST_MARKERS)
 
 
 def append_log_file(path: Path, message: str) -> None:
@@ -508,6 +537,7 @@ def enqueue_for_prep(job_ids: list[str]) -> list[str]:
             STATUS_APPLIED,
             STATUS_SYNCED,
             STATUS_SKIPPED,
+            "filled",
         }:
             continue
         queued.append(job_id)
@@ -539,30 +569,71 @@ def reset_orphaned_prepping() -> int:
     return reset
 
 
+def skip_non_automatable_jobs(job_ids: list[str] | None = None) -> int:
+    """Mark login-walled / custom-portal listings as skipped so they never block auto-apply."""
+    wanted = {str(job_id) for job_id in (job_ids or []) if job_id} or None
+    skipped = 0
+    for job in load_match_jobs():
+        if wanted is not None and job.id not in wanted:
+            continue
+        if job.fill_status not in {STATUS_PENDING, STATUS_PREPPING, STATUS_FAILED}:
+            continue
+        if is_automatable_apply_url(job.best_url()):
+            continue
+        update_match_status(
+            job.id,
+            fill_status=STATUS_SKIPPED,
+            notes=(
+                job.notes
+                or "Skipped auto-apply: not a Greenhouse/Lever/Ashby form "
+                "(company portal or login required)."
+            ),
+        )
+        skipped += 1
+    return skipped
+
+
+def pending_auto_apply_ids() -> list[str]:
+    return [
+        job.id
+        for job in load_match_jobs()
+        if job.fill_status == STATUS_PENDING
+        and is_automatable_apply_url(job.best_url())
+    ]
+
+
 def spawn_auto_prep_bot() -> str:
-    """Start bot.py --auto-prep in a visible console so the human can review Submit."""
+    """Start bot.py --auto-prep. Chromium stays visible; output is always logged."""
     reset_orphaned_prepping()
-    command = [sys.executable, str(ROOT / "bot.py"), "--auto-prep"]
+    command = [sys.executable, "-u", str(ROOT / "bot.py"), "--auto-prep"]
     limit = auto_prep_limit()
     if limit > 0:
         command.extend(["--limit", str(limit)])
 
-    kwargs: dict[str, Any] = {"cwd": str(ROOT)}
+    log_handle = BOT_LOG_PATH.open("a", encoding="utf-8")
+    kwargs: dict[str, Any] = {
+        "cwd": str(ROOT),
+        "stdout": log_handle,
+        "stderr": log_handle,
+        "stdin": subprocess.DEVNULL,
+    }
     if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        kwargs["close_fds"] = False
     else:
         kwargs["start_new_session"] = True
-        log_handle = BOT_LOG_PATH.open("a", encoding="utf-8")
-        kwargs["stdout"] = log_handle
-        kwargs["stderr"] = log_handle
-        kwargs["stdin"] = subprocess.DEVNULL
 
     process = subprocess.Popen(command, **kwargs)
     write_bot_lock(pid=process.pid)
     queued = load_prep_queue_ids()
+    action = "auto-apply" if auto_submit_enabled() else "auto-prep"
     message = (
-        f"Started Playwright auto-prep (pid {process.pid}) for {len(queued)} $150k+ role(s). "
-        "Each form is filled and paused before Submit — review the browser, then approve in the dashboard."
+        f"Started Playwright {action} (pid {process.pid}) for {len(queued)} $150k+ role(s). "
+        + (
+            "Forms are filled and submitted on Greenhouse/Lever/Ashby."
+            if auto_submit_enabled()
+            else "Each form is filled and paused before Submit."
+        )
     )
     append_log_file(BOT_LOG_PATH, message)
     append_log_file(WORKER_LOG_PATH, message)
@@ -571,15 +642,25 @@ def spawn_auto_prep_bot() -> str:
 
 def request_auto_prep(job_ids: list[str] | None = None) -> str:
     """
-    Queue high-paying matches for Playwright and launch the filler if it is idle.
+    Queue automatable matches for Playwright and launch the filler if it is idle.
 
-    Discovery should call this with the ids of *new* matches so historical
-    pending rows are not suddenly opened in bulk.
+    Login-walled boards are marked skipped. Leftover pending Greenhouse/Lever/Ashby
+    rows are included so a scrape that never launched the bot still gets applied.
     """
     if not auto_prep_enabled():
         return ""
 
-    ids = [str(job_id) for job_id in (job_ids or []) if job_id]
+    reset_orphaned_prepping()
+    extra = [str(job_id) for job_id in (job_ids or []) if job_id]
+    skip_non_automatable_jobs()
+    ids: list[str] = []
+    seen: set[str] = set()
+    for job_id in extra + pending_auto_apply_ids():
+        if not job_id or job_id in seen:
+            continue
+        seen.add(job_id)
+        ids.append(job_id)
+
     queued = enqueue_for_prep(ids) if ids else load_prep_queue_ids()
     if ids and queued:
         preview = []
@@ -587,10 +668,11 @@ def request_auto_prep(job_ids: list[str] | None = None) -> str:
             job = find_match(job_id)
             if job:
                 preview.append(f"{job.company} — {job.title}")
-        extra = f" including {', '.join(preview)}" if preview else ""
+        extra_label = f" including {', '.join(preview)}" if preview else ""
         append_log_file(
             BOT_LOG_PATH,
-            f"Queued {len(ids)} new $150k+ match(es) for automatic Playwright prep{extra}.",
+            f"Queued {len(ids)} Greenhouse/Lever/Ashby role(s) for automatic Playwright "
+            f"{'apply' if auto_submit_enabled() else 'prep'}{extra_label}.",
         )
 
     queued = load_prep_queue_ids()
@@ -601,8 +683,8 @@ def request_auto_prep(job_ids: list[str] | None = None) -> str:
         lock = _read_bot_lock()
         current = lock.get("job_id") or "the current listing"
         message = (
-            f"{len(queued)} role(s) queued for Playwright. A prep window is already open "
-            f"({current}); new forms will start after you finish that review."
+            f"{len(queued)} role(s) queued for Playwright. A window is already open "
+            f"({current}); new forms will start after that listing finishes."
         )
         append_log_file(BOT_LOG_PATH, message)
         append_log_file(WORKER_LOG_PATH, message)

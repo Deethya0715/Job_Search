@@ -2,7 +2,7 @@
 
 Production-style monitor for **high-paying New Grad / Full Stack Software Engineer** roles across **LinkedIn, Indeed, Glassdoor, ZipRecruiter, Google Jobs, Greenhouse, and Lever**.
 
-It scores postings against `profile.json` (Python, JavaScript, TypeScript, React, Next.js, Prisma, SQL, AI/ML, U.S. Provisional Patent), keeps a **$150k+** compensation floor, fills applications in a visible Playwright window, **never clicks Submit**, syncs approved apps to [your Google Sheet](https://docs.google.com/spreadsheets/d/1TO5rtMymBoo64X2bld2R-HqBGlWim_m7kHNcHkICtxY/edit), and emails a digest at **9:00 PM America/Chicago**.
+It scores postings against `profile.json` (Python, JavaScript, TypeScript, React, Next.js, Prisma, SQL, AI/ML, U.S. Provisional Patent), keeps a **$150k+** compensation floor, auto-applies on Greenhouse / Lever / Ashby via Playwright (`AUTO_SUBMIT=1`), syncs approved apps to [your Google Sheet](https://docs.google.com/spreadsheets/d/1TO5rtMymBoo64X2bld2R-HqBGlWim_m7kHNcHkICtxY/edit), and emails a digest at **9:00 PM America/Chicago**.
 
 Use this only for roles you intend to apply to, with your own information, and within each site's terms of use.
 
@@ -12,7 +12,7 @@ Use this only for roles you intend to apply to, with your own information, and w
 | --- | --- | --- |
 | Candidate profile | `profile.json` | Name, UTD CS (Dec 2026), U.S. citizenship, GitHub, skills, $150k floor |
 | Universal scraper | `aggregator.py` | JobSpy + Greenhouse + Lever + Simplify, salary filter, resume score, auto-queue Playwright |
-| Form filler | `bot.py` | Playwright `headless=False`, fills fields, uploads resume, **stops before Submit** |
+| Form filler | `bot.py` | Playwright fills Greenhouse/Lever/Ashby; `AUTO_SUBMIT=1` clicks Submit |
 | Sheets tracker | `tracker_sync.py` | `gspread` append after you confirm a submission |
 | Digest | `reporter.py` | Markdown + SMTP, including Sheets sync status |
 | Clock | `scheduler.py` | 9:00 PM America/Chicago scrape + email |
@@ -187,13 +187,13 @@ web: streamlit run app.py --server.port=$PORT --server.address=0.0.0.0 --server.
 worker: python worker.py
 ```
 
-Set the same env vars as `.env` in the host dashboard, and upload `credentials.json` as a secret file. Playwright form filling (`headless=False`) is a **local** workflow — cloud instances have no visible browser for you to review before Submit. Set `AUTO_PREP=0` on cloud so the worker only discovers and queues matches.
+Set the same env vars as `.env` in the host dashboard, and upload `credentials.json` as a secret file. Playwright form filling is a **local** workflow. Cloud instances have no desktop browser. Keep `AUTO_SUBMIT=1` only on the machine where Chromium can run, or set `AUTO_PREP=0` on cloud so the worker only discovers matches.
 
-## Safety rule
+## Auto-apply rule
 
-`bot.py` **fills fields only**. It does not click Submit, Apply, or Send Application. Cookie banners and resume Attach buttons are the only clicks it makes.
+`bot.py` fills Greenhouse, Lever, and Ashby forms from `profile.json` and the resume PDF. With `AUTO_SUBMIT=1` it also clicks Submit. Workday, LinkedIn Easy Apply, TikTok, Amazon, Apple, Google, and other login portals are skipped — those still need you to apply in the browser.
 
-It will not invent essay answers, bypass CAPTCHAs or logins, or click Submit while you are away. LinkedIn Easy Apply and some Workday portals still need a manual login during the pause.
+It will not invent essay answers or bypass CAPTCHAs. Set `AUTO_SUBMIT=0` if you want fill-only with a review pause.
 
 ## Troubleshooting
 
@@ -212,7 +212,7 @@ automated_job/
   app.py                Streamlit dashboard
   worker.py             24/7 scrape + 9 PM scheduler
   aggregator.py         multi-board scrape / score / de-dupe / auto-queue Playwright
-  bot.py                Playwright filler (no submit; auto-prep + review pause)
+  bot.py                Playwright filler (AUTO_SUBMIT clicks Submit on Greenhouse/Lever/Ashby)
   tracker_sync.py       Google Sheets append
   reporter.py           Markdown + SMTP digest
   scheduler.py          9:00 PM trigger

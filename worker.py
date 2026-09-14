@@ -5,9 +5,9 @@ Runs the multi-board aggregator on a timer, keeps the 9:00 PM America/Chicago
 email scheduler armed, and writes a heartbeat to worker_status.json so the
 Streamlit dashboard can show live status.
 
-New $150k+ matches are queued automatically. `discover()` launches `bot.py
---auto-prep`, which fills forms in a visible Playwright window and pauses
-before Submit for human review.
+New $150k+ matches on Greenhouse, Lever, and Ashby are queued automatically.
+`discover()` launches `bot.py --auto-prep`, which fills forms and, when
+`AUTO_SUBMIT=1`, clicks Submit. Other career portals are skipped.
 """
 
 from __future__ import annotations

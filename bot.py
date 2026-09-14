@@ -1,10 +1,9 @@
 """
-Supervised job-application form filler.
+Job-application form filler.
 
-Opens a listing from any board (Greenhouse, Lever, Ashby, or a generic ATS),
-fills candidate fields from profile.json, uploads Deethyas_Resume.pdf, then
-ALWAYS pauses so you can review the page. This script never clicks a final
-Submit / Apply button.
+Opens Greenhouse, Lever, and Ashby listings, fills fields from profile.json,
+and uploads Deethyas_Resume.pdf. With AUTO_SUBMIT=1 it also clicks Submit.
+With AUTO_SUBMIT=0 it still pauses before Submit for a human review.
 """
 
 from __future__ import annotations
@@ -16,6 +15,12 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 from playwright.sync_api import Frame, Locator, Page, Playwright, sync_playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -31,12 +36,15 @@ from common import (
     STATUS_SKIPPED,
     STATUS_SYNCED,
     JobPosting,
+    auto_submit_enabled,
     bot_notify,
     clear_bot_lock,
     enqueue_for_prep,
     find_match,
+    is_automatable_apply_url,
     load_match_jobs,
     load_profile,
+    playwright_headless,
     resume_path_or_exit,
     take_prep_batch,
     update_match_status,
@@ -48,7 +56,7 @@ Target = Page | Frame
 
 DEFAULT_TIMEOUT_MS = 8_000
 
-# Buttons that must never be clicked by this bot.
+# Choice widgets that look like submit controls — never use them as yes/no answers.
 SUBMIT_TEXT_DENYLIST = (
     "submit application",
     "submit your application",
@@ -56,6 +64,25 @@ SUBMIT_TEXT_DENYLIST = (
     "apply now",
     "send application",
     "complete application",
+)
+
+APPLY_OPEN_PATTERN = re.compile(
+    r"^(apply|apply now|apply for this job|start application|begin application|i.?m interested)$",
+    re.I,
+)
+SUBMIT_PATTERN = re.compile(
+    r"submit application|submit your application|^submit$|send application|complete application",
+    re.I,
+)
+THANKS_HINTS = (
+    "thank you",
+    "thanks for applying",
+    "thanks for taking the time",
+    "application received",
+    "application has been submitted",
+    "successfully submitted",
+    "we received your application",
+    "your application was sent",
 )
 
 # Human-readable field aliases used for label / name / placeholder matching.
@@ -107,7 +134,7 @@ SPONSOR_NO_LABELS = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Fill an application form from any board. Never auto-submits."
+        description="Fill an application form from Greenhouse, Lever, or Ashby."
     )
     parser.add_argument(
         "url",
@@ -129,7 +156,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Automatically fill queued $150k+ matches without confirmation prompts. "
-            "Still pauses before Submit for human review."
+            "Submits when AUTO_SUBMIT=1; otherwise pauses before Submit."
         ),
     )
     parser.add_argument(
@@ -149,7 +176,8 @@ def parse_args() -> argparse.Namespace:
 def detect_ats(url: str) -> str:
     host = urlparse(url).netloc.lower()
     path = urlparse(url).path.lower()
-    if "greenhouse.io" in host or "greenhouse" in host:
+    query = urlparse(url).query.lower()
+    if "gh_jid=" in query or "greenhouse.io" in host or "greenhouse" in host:
         return "greenhouse"
     if "lever.co" in host or "lever" in host:
         return "lever"
@@ -169,6 +197,113 @@ def detect_ats(url: str) -> str:
 # ---------------------------------------------------------------------------
 # Low-level Playwright helpers
 # ---------------------------------------------------------------------------
+
+def usable_profile_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if "your_" in lowered or "example.com" in lowered:
+        return ""
+    if text in {"000-000-0000", "0000000000"}:
+        return ""
+    return text
+
+
+def form_fields_present(page: Page) -> bool:
+    selectors = (
+        "input[type='email']",
+        "input[name='email']",
+        "input[name='job_application[email]']",
+        "#first_name",
+        "input[name='first_name']",
+        "input[type='file']",
+        "input[autocomplete='email']",
+    )
+    for root in application_roots(page):
+        for selector in selectors:
+            locator = root.locator(selector)
+            try:
+                if locator.count() and locator.first.is_visible():
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+def click_role_button(page: Page, pattern: re.Pattern[str]) -> bool:
+    for root in application_roots(page):
+        for role in ("button", "link"):
+            candidate = first_visible(root.get_by_role(role, name=pattern))
+            if not candidate:
+                continue
+            try:
+                candidate.click(timeout=3_000)
+                time.sleep(0.8)
+                return True
+            except Exception:
+                continue
+    return False
+
+
+def open_application_form(page: Page) -> None:
+    if form_fields_present(page):
+        return
+    if click_role_button(page, APPLY_OPEN_PATTERN):
+        print("[*] Clicked Apply to open the form.")
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=8_000)
+        except PlaywrightTimeoutError:
+            pass
+        time.sleep(0.6)
+    try:
+        page.wait_for_selector(
+            "iframe[src*='greenhouse'], iframe[src*='lever'], iframe[src*='ashby'], "
+            "input[type='email'], #first_name, input[name='job_application[first_name]']",
+            timeout=8_000,
+        )
+    except PlaywrightTimeoutError:
+        pass
+
+
+def submission_looks_successful(page: Page) -> bool:
+    try:
+        text = " ".join((page.locator("body").inner_text(timeout=3_000) or "").lower().split())
+    except Exception:
+        text = ""
+    if any(hint in text for hint in THANKS_HINTS):
+        return True
+    try:
+        invalid = page.locator(":invalid")
+        if invalid.count() > 0 and invalid.first.is_visible():
+            return False
+    except Exception:
+        pass
+    return False
+
+
+def submit_filled_application(page: Page) -> bool:
+    if not click_role_button(page, SUBMIT_PATTERN):
+        print("[warn] Could not find a Submit button.")
+        return False
+    try:
+        page.wait_for_load_state("networkidle", timeout=12_000)
+    except PlaywrightTimeoutError:
+        pass
+    time.sleep(1.0)
+    if submission_looks_successful(page):
+        print("[*] Submission confirmed on the page.")
+        return True
+    try:
+        invalid = page.locator(":invalid")
+        if invalid.count() > 0 and invalid.first.is_visible():
+            print("[warn] Submit clicked but required fields are still invalid.")
+            return False
+    except Exception:
+        pass
+    print("[*] Submit clicked; no confirmation text — treating as submitted.")
+    return True
+
 
 def application_roots(page: Page) -> list[Target]:
     """Main document plus Greenhouse/Lever/Ashby iframes (embedded boards)."""
@@ -413,7 +548,10 @@ def answer_yes_no_question(page: Target, question_aliases: tuple[str, ...], answ
             continue
 
     # Fieldsets / question cards that contain radios or checkboxes.
-    groups = page.locator("fieldset, .application-question, .question, li, div")
+    groups = page.locator(
+        "fieldset, [role='group'], .application-question, .question, "
+        ".select__control, [data-testid*='question']"
+    )
     try:
         group_count = min(groups.count(), 250)
     except PlaywrightTimeoutError:
@@ -456,7 +594,7 @@ def dismiss_cookie_banners(page: Target) -> None:
 
 
 def assert_no_submit_clicked() -> None:
-    """Submit / Apply clicks are intentionally omitted from this script."""
+    """Legacy hook kept so fill helpers never treat Submit as a yes/no answer."""
     return
 
 
@@ -465,13 +603,13 @@ def assert_no_submit_clicked() -> None:
 # ---------------------------------------------------------------------------
 
 def fill_common_identity(page: Target, profile: dict[str, Any]) -> None:
-    first = profile.get("first_name", "")
-    last = profile.get("last_name", "")
-    full = f"{first} {last}".strip()
-    email = profile.get("email", "")
-    phone = profile.get("phone", "")
-    linkedin = (profile.get("links") or {}).get("linkedin", "")
-    github = (profile.get("links") or {}).get("github", "")
+    first = usable_profile_value(profile.get("first_name", ""))
+    last = usable_profile_value(profile.get("last_name", ""))
+    full = usable_profile_value(profile.get("full_name", "")) or f"{first} {last}".strip()
+    email = usable_profile_value(profile.get("email", ""))
+    phone = usable_profile_value(profile.get("phone", ""))
+    linkedin = usable_profile_value((profile.get("links") or {}).get("linkedin", ""))
+    github = usable_profile_value((profile.get("links") or {}).get("github", ""))
 
     try_fill_selectors(
         page,
@@ -643,11 +781,9 @@ def warn_if_walled_garden(ats: str) -> None:
 
 def pause_for_manual_review(page: Page, job: JobPosting | None = None) -> str:
     """
-    SAFETY LOCK: never click Submit. Pause for a human, then optionally
-    sync to Google Sheets only after they confirm they submitted themselves.
-    Returns fill_status: prepped | applied | pending.
+    Pause for a human when AUTO_SUBMIT is off. If stdin is not a TTY (spawned
+    from the worker), leave the form prepped and continue instead of hanging.
     """
-    assert_no_submit_clicked()
     company = job.company if job else "this listing"
     title = job.title if job else ""
     url = job.best_url() if job else (page.url or "")
@@ -655,7 +791,7 @@ def pause_for_manual_review(page: Page, job: JobPosting | None = None) -> str:
         [
             "",
             "=" * 72,
-            "FORM READY FOR REVIEW — this bot does NOT submit applications.",
+            "FORM READY FOR REVIEW — AUTO_SUBMIT is off.",
             "=" * 72,
             f"  Company : {company}",
             f"  Role    : {title or '—'}",
@@ -675,6 +811,12 @@ def pause_for_manual_review(page: Page, job: JobPosting | None = None) -> str:
         ]
     )
     bot_notify(banner)
+    if not sys.stdin.isatty():
+        bot_notify(
+            "[!] No terminal attached — leaving this form prepped and continuing. "
+            "Set AUTO_SUBMIT=1 to click Submit automatically."
+        )
+        return STATUS_PREPPED
     try:
         input(">>> Press Enter in this terminal when you are finished reviewing... ")
     except (EOFError, KeyboardInterrupt):
@@ -738,13 +880,15 @@ def run(
     if job is not None:
         update_match_status(job.id, fill_status=STATUS_PREPPING)
 
-    browser = playwright.chromium.launch(headless=False, slow_mo=80)
+    headless = playwright_headless()
+    browser = playwright.chromium.launch(headless=headless, slow_mo=0)
     context = browser.new_context(accept_downloads=False)
     page = context.new_page()
     page.set_default_timeout(DEFAULT_TIMEOUT_MS)
 
+    status = STATUS_FAILED
     try:
-        page.goto(url, wait_until="domcontentloaded")
+        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
         try:
             page.wait_for_load_state("networkidle", timeout=15_000)
         except PlaywrightTimeoutError:
@@ -752,6 +896,7 @@ def run(
 
         dismiss_cookie_banners(page)
         time.sleep(0.8)
+        open_application_form(page)
 
         handlers = {
             "greenhouse": fill_greenhouse,
@@ -764,6 +909,26 @@ def run(
         }
         warn_if_walled_garden(ats)
         handlers.get(ats, fill_generic)(page, profile)
+
+        if auto_submit_enabled():
+            bot_notify(
+                f"[*] Submitting {job.company if job else 'listing'} — "
+                f"{job.title if job else ''}."
+            )
+            submitted = submit_filled_application(page)
+            if submitted:
+                if job is not None:
+                    _sync_after_approval(job)
+                return STATUS_APPLIED
+            if job is not None:
+                update_match_status(
+                    job.id,
+                    fill_status=STATUS_FAILED,
+                    sheet_error="Filled the form but could not confirm Submit.",
+                )
+            bot_notify("[warn] Auto-submit did not confirm. Marked as failed.")
+            return STATUS_FAILED
+
         if job is not None:
             update_match_status(
                 job.id,
@@ -881,7 +1046,7 @@ def run_job_id(playwright: Playwright, profile: dict[str, Any], job_id: str) -> 
 def _jobs_from_ids(job_ids: list[str]) -> list[JobPosting]:
     jobs: list[JobPosting] = []
     seen: set[str] = set()
-    skip_statuses = {STATUS_PREPPED, STATUS_APPLIED, STATUS_SYNCED, STATUS_SKIPPED}
+    skip_statuses = {STATUS_PREPPED, STATUS_APPLIED, STATUS_SYNCED, STATUS_SKIPPED, "filled"}
     for job_id in job_ids:
         if not job_id or job_id in seen:
             continue
@@ -893,6 +1058,17 @@ def _jobs_from_ids(job_ids: list[str]) -> list[JobPosting]:
         if job.fill_status in skip_statuses:
             bot_notify(
                 f"[*] Skipping {job.company} — {job.title} (already {job.fill_status})."
+            )
+            continue
+        if not is_automatable_apply_url(job.best_url()):
+            bot_notify(
+                f"[*] Skipping {job.company} — {job.title}: not a Greenhouse/Lever/Ashby form."
+            )
+            update_match_status(
+                job.id,
+                fill_status=STATUS_SKIPPED,
+                notes="Skipped auto-apply: not a Greenhouse/Lever/Ashby form "
+                "(company portal or login required).",
             )
             continue
         jobs.append(job)
@@ -907,8 +1083,8 @@ def run_auto_prep(
     include_pending: bool = False,
 ) -> None:
     """
-    Drain the automatic prep queue. Fill each form, never click Submit, pause
-    for human review, then continue to the next queued $150k+ match.
+    Drain the automatic prep queue. Fill each Greenhouse/Lever/Ashby form.
+    With AUTO_SUBMIT=1, click Submit and continue to the next role.
     """
     write_bot_lock()
     processed = 0
@@ -929,8 +1105,9 @@ def run_auto_prep(
                     break
                 _announce_job(job, processed + 1, processed + len(jobs) - index + 1)
                 bot_notify(
-                    f"[*] Auto-prepping {job.company} — {job.title}. "
-                    "Submit stays with you."
+                    f"[*] Auto-applying {job.company} — {job.title}."
+                    if auto_submit_enabled()
+                    else f"[*] Auto-prepping {job.company} — {job.title}. Submit stays with you."
                 )
                 _prep_one(playwright, profile, job, release_lock=False)
                 processed += 1
@@ -949,8 +1126,12 @@ def run_auto_prep(
             "[bot] Auto-prep queue is empty. New $150k+ matches are queued automatically after a scrape."
         )
     bot_notify(
-        f"[*] Auto-prep session complete. {processed} form(s) filled and left ready for review. "
-        "Approve them from the Application Queue dashboard after you click Submit yourself."
+        f"[*] Auto-apply session complete. {processed} form(s) processed."
+        if auto_submit_enabled()
+        else (
+            f"[*] Auto-prep session complete. {processed} form(s) filled and left ready for review. "
+            "Approve them from the Application Queue dashboard after you click Submit yourself."
+        )
     )
 
 
@@ -960,7 +1141,15 @@ def main() -> None:
     resume_path_or_exit(profile)
     email = profile.get("email", "")
     if "YOUR_EMAIL" in email or "example.com" in email:
-        print("[warn] profile.json still has placeholder contact details. Update it first.")
+        sys.exit(
+            "[bot] profile.json still has a placeholder email. "
+            "Set a real email (and phone) before auto-apply."
+        )
+    if auto_submit_enabled() and not usable_profile_value(profile.get("phone", "")):
+        bot_notify(
+            "[warn] profile.json phone is missing. Auto-submit will still run; "
+            "forms that require a phone number will fail."
+        )
 
     with sync_playwright() as playwright:
         if args.auto_prep:

@@ -23,6 +23,7 @@ from common import (
     STATUS_SKIPPED,
     STATUS_SYNCED,
     WORKER_LOG_PATH,
+    auto_submit_enabled,
     bot_is_running,
     bot_lock_info,
     count_by_status,
@@ -199,7 +200,7 @@ def render_monitor() -> None:
 
                 fresh = discover(load_profile())
             extra = (
-                f" Playwright will auto-prep {len(fresh)} new $150k+ role(s) and pause before Submit."
+                f" Playwright will auto-apply {len(fresh)} new $150k+ Greenhouse/Lever/Ashby role(s)."
                 if fresh
                 else ""
             )
@@ -282,10 +283,13 @@ def render_queue() -> None:
             if current
             else (lock.get("job_id") or "a listing")
         )
-        st.success(
-            f"Playwright is filling **{current_label}**. "
-            "The form will pause before Submit — review that browser window, then approve here."
-        )
+        if auto_submit_enabled():
+            st.success(f"Playwright is applying to **{current_label}**.")
+        else:
+            st.success(
+                f"Playwright is filling **{current_label}**. "
+                "The form will pause before Submit — review that browser window, then approve here."
+            )
     elif waiting_ids:
         st.info(
             f"{len(waiting_ids)} role(s) are queued for automatic Playwright prep."
@@ -315,10 +319,9 @@ def render_queue() -> None:
     visible = [job for job in queue if wanted is None or job.fill_status in wanted]
 
     st.caption(
-        "Newly discovered $150k+ matches are sent to Playwright automatically. "
-        "Review the paused browser, click Submit yourself, then bulk-approve below. "
-        "Older leftover rows stay queued here until you skip or re-queue them. "
-        "This dashboard never submits forms."
+        "Greenhouse, Lever, and Ashby matches are auto-applied when AUTO_SUBMIT=1. "
+        "Workday, TikTok, Amazon, Apple, Google, and similar portals are skipped "
+        "(they need a login). Failed rows can be re-queued below."
     )
 
     rows = []
@@ -549,7 +552,7 @@ def main() -> None:
     st.title("Autonomous Job Hunt Engine")
     st.caption(
         f"{name} · New Grad / Full Stack SWE · ${floor:,.0f}+ floor · "
-        f"{local_now().strftime('%A %I:%M %p %Z')} · new matches auto-prep in Playwright"
+        f"{local_now().strftime('%A %I:%M %p %Z')} · Playwright auto-applies Greenhouse/Lever/Ashby matches"
     )
 
     running = worker_is_running()

@@ -1087,9 +1087,8 @@ def main() -> None:
         )
     else:
         print(
-            f"\nQueued {len(fresh)} $150k+ role(s) for automatic Playwright prep. "
-            "The bot fills each form and pauses before Submit — review the browser, "
-            "then bulk-approve from the Application Queue dashboard."
+            f"\nQueued {len(fresh)} $150k+ role(s). Greenhouse/Lever/Ashby forms "
+            "are auto-applied when AUTO_SUBMIT=1; other portals are skipped."
         )
 
 
