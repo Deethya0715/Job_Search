@@ -4,41 +4,42 @@ Streamlit control plane for the job-hunting engine.
 Tabs:
   1. Live Monitor Status  — start/stop the 24/7 worker
   2. Discovered Jobs Feed — scored listings from every board
-  3. Application Queue    — Playwright-prepped roles waiting for review
+  3. Application Queue    — auto-prepped roles waiting for bulk review
   4. Tracker Sync Status  — rows pushed to Google Sheets
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
-from pathlib import Path
-
 import pandas as pd
 import streamlit as st
 
 from common import (
-    BOT_LOCK_PATH,
-    ROOT,
+    BOT_LOG_PATH,
     STATUS_APPLIED,
+    STATUS_FAILED,
     STATUS_PENDING,
     STATUS_PREPPED,
+    STATUS_PREPPING,
     STATUS_SKIPPED,
     STATUS_SYNCED,
     WORKER_LOG_PATH,
+    bot_is_running,
+    bot_lock_info,
     count_by_status,
     env,
     find_match,
     google_sheets_id,
     jobs_found_on,
     load_match_jobs,
+    load_prep_queue_ids,
     load_profile,
     load_seen_jobs,
     load_tracker_log,
     load_worker_status,
     local_now,
+    request_auto_prep,
     service_account_path,
+    status_label,
     update_match_status,
 )
 from worker import start_worker_process, stop_worker_process, worker_is_running
@@ -126,21 +127,11 @@ def _tail_log(path: Path, lines: int = 40) -> str:
     return "\n".join(text.splitlines()[-lines:]) or "Log is empty."
 
 
-def launch_playwright(job_id: str) -> str:
-    if BOT_LOCK_PATH.exists():
-        return "A Playwright window is already open. Finish that review first."
-    job = find_match(job_id)
-    if job is None or not job.best_url():
-        return "That job has no apply URL."
-    command = [sys.executable, str(ROOT / "bot.py"), "--job-id", job_id]
-    kwargs: dict = {"cwd": str(ROOT)}
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
-    else:
-        kwargs["start_new_session"] = True
-    subprocess.Popen(command, **kwargs)
-    update_match_status(job_id, fill_status=STATUS_PREPPED)
-    return f"Opened Playwright for {job.company}. Review the form, submit yourself, then confirm in the console."
+def queue_for_playwright(job_ids: list[str]) -> str:
+    ids = [job_id for job_id in job_ids if job_id]
+    if not ids:
+        return "Select at least one role first."
+    return request_auto_prep(ids) or "Nothing new to prep — those roles are already filled or have no apply URL."
 
 
 def mark_submitted_and_sync(job_id: str, contact_person: str, contact_email: str, notes: str) -> str:
@@ -207,7 +198,12 @@ def render_monitor() -> None:
                 from aggregator import discover
 
                 fresh = discover(load_profile())
-            st.success(f"Scrape finished. {len(fresh)} new matching role(s).")
+            extra = (
+                f" Playwright will auto-prep {len(fresh)} new $150k+ role(s) and pause before Submit."
+                if fresh
+                else ""
+            )
+            st.success(f"Scrape finished. {len(fresh)} new matching role(s).{extra}")
             st.rerun()
         if st.button("Refresh status", use_container_width=True):
             st.rerun()
@@ -260,52 +256,204 @@ def render_queue() -> None:
     queue = [
         job
         for job in jobs
-        if job.fill_status in {STATUS_PENDING, STATUS_PREPPED, STATUS_APPLIED}
+        if job.fill_status
+        in {STATUS_PENDING, STATUS_PREPPING, STATUS_PREPPED, STATUS_APPLIED, STATUS_FAILED}
     ]
     queue.sort(key=lambda job: (-job.match_score, job.company.lower()))
+
+    pending_n = sum(1 for job in queue if job.fill_status == STATUS_PENDING)
+    prepping_n = sum(1 for job in queue if job.fill_status == STATUS_PREPPING)
+    ready_n = sum(1 for job in queue if job.fill_status == STATUS_PREPPED)
+    applied_n = sum(1 for job in queue if job.fill_status == STATUS_APPLIED)
+    failed_n = sum(1 for job in queue if job.fill_status == STATUS_FAILED)
+    waiting_ids = load_prep_queue_ids()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Queued for prep", pending_n)
+    c2.metric("Prepping now", prepping_n)
+    c3.metric("Ready for review", ready_n)
+    c4.metric("Submitted / failed", f"{applied_n} / {failed_n}")
+
+    if bot_is_running():
+        lock = bot_lock_info()
+        current = find_match(str(lock.get("job_id") or ""))
+        current_label = (
+            f"{current.company} — {current.title}"
+            if current
+            else (lock.get("job_id") or "a listing")
+        )
+        st.success(
+            f"Playwright is filling **{current_label}**. "
+            "The form will pause before Submit — review that browser window, then approve here."
+        )
+    elif waiting_ids:
+        st.info(
+            f"{len(waiting_ids)} role(s) are queued for automatic Playwright prep."
+        )
+        if st.button("Start Playwright for queued roles", use_container_width=False):
+            st.info(request_auto_prep() or "Queue is already empty.")
+            st.rerun()
+
     if not queue:
-        st.info("Queue is empty. Start the monitor to discover $150k+ New Grad / Full Stack roles.")
+        st.info(
+            "Queue is empty. Start the monitor to discover $150k+ New Grad / Full Stack roles. "
+            "New matches are auto-prepped in Playwright and show up here for bulk review."
+        )
+        st.subheader("Playwright log")
+        st.code(_tail_log(BOT_LOG_PATH), language="text")
         return
 
-    labels = {
-        f"{job.match_score:.0f}  {job.company} — {job.title}  ({job.fill_status})": job.id
-        for job in queue
+    filters = {
+        "All active": None,
+        "Ready for review": {STATUS_PREPPED},
+        "Queued / prepping": {STATUS_PENDING, STATUS_PREPPING},
+        "Submitted (not synced)": {STATUS_APPLIED},
+        "Prep failed": {STATUS_FAILED},
     }
-    selected_label = st.selectbox("Select a role", list(labels))
-    job_id = labels[selected_label]
-    job = find_match(job_id)
-    if job is None:
-        st.warning("Job disappeared from the queue.")
-        return
+    filter_label = st.selectbox("Show", list(filters))
+    wanted = filters[filter_label]
+    visible = [job for job in queue if wanted is None or job.fill_status in wanted]
 
-    st.markdown(f"**{job.company} — {job.title}**")
-    meta1, meta2, meta3 = st.columns(3)
-    meta1.write(f"Score: **{job.match_score:.1f}**")
-    meta2.write(f"Salary: **{job.salary_label()}**")
-    meta3.write(f"Status: `{job.fill_status}`")
-    st.write(f"Location: {job.location or '—'}  ·  Source: `{job.source}`")
-    st.link_button("Open job posting", job.best_url(), use_container_width=False)
+    st.caption(
+        "Newly discovered $150k+ matches are sent to Playwright automatically. "
+        "Review the paused browser, click Submit yourself, then bulk-approve below. "
+        "Older leftover rows stay queued here until you skip or re-queue them. "
+        "This dashboard never submits forms."
+    )
 
-    if job.matched_skills:
-        st.write("Matched skills:", ", ".join(job.matched_skills))
+    rows = []
+    for job in visible:
+        rows.append(
+            {
+                "Select": False,
+                "Status": status_label(job.fill_status),
+                "Score": job.match_score,
+                "Company": job.company,
+                "Role": job.title,
+                "Location": job.location or "—",
+                "Salary": job.salary_label(),
+                "Source": job.source,
+                "Link": job.best_url(),
+                "id": job.id,
+                "_status": job.fill_status,
+            }
+        )
+    frame = pd.DataFrame(rows)
+    selected_ids: list[str] = []
+    if frame.empty:
+        st.info("No roles in this filter.")
+    else:
+        edited = st.data_editor(
+            frame,
+            use_container_width=True,
+            hide_index=True,
+            height=min(560, 52 + 36 * max(len(frame), 3)),
+            column_order=[
+                "Select",
+                "Status",
+                "Score",
+                "Company",
+                "Role",
+                "Location",
+                "Salary",
+                "Source",
+                "Link",
+            ],
+            column_config={
+                "Select": st.column_config.CheckboxColumn("Select", default=False),
+                "Link": st.column_config.LinkColumn("Job link", display_text="Open"),
+                "Score": st.column_config.NumberColumn(format="%.1f"),
+                "Status": st.column_config.TextColumn("Status", width="medium"),
+            },
+            disabled=[col for col in frame.columns if col != "Select"],
+            key=f"application_queue_editor_{filter_label}_{len(visible)}",
+        )
+        selected_ids = [
+            str(job_id)
+            for job_id, chosen in zip(edited["id"], edited["Select"])
+            if bool(chosen)
+        ]
+        st.caption(f"{len(selected_ids)} selected · {len(visible)} shown · {len(queue)} in queue")
 
-    contact_person = st.text_input("Contact person (optional)", value=job.contact_person)
-    contact_email = st.text_input("Contact email (optional)", value=job.contact_email)
-    notes = st.text_input("Notes (optional)", value=job.notes)
+    contact_person = st.text_input("Contact person (optional, applied to approvals)")
+    contact_email = st.text_input("Contact email (optional, applied to approvals)")
+    notes = st.text_input("Notes (optional, applied to approvals)")
 
-    c1, c2, c3 = st.columns(3)
-    if c1.button("Prep with Playwright", type="primary", use_container_width=True):
-        st.info(launch_playwright(job.id))
-    if c2.button("I submitted — sync tracker", use_container_width=True):
-        st.success(mark_submitted_and_sync(job.id, contact_person, contact_email, notes))
+    a1, a2, a3, a4 = st.columns(4)
+    approve_selected = a1.button(
+        "Approve selected & sync",
+        type="primary",
+        use_container_width=True,
+        help="Use after you click Submit yourself on the auto-prepped forms.",
+    )
+    approve_ready = a2.button(
+        "Approve all ready for review",
+        use_container_width=True,
+    )
+    skip_selected = a3.button("Skip selected", use_container_width=True)
+    refresh = a4.button("Refresh queue", use_container_width=True)
+    if refresh:
         st.rerun()
-    if c3.button("Skip this role", use_container_width=True):
-        update_match_status(job.id, fill_status=STATUS_SKIPPED)
-        st.rerun()
 
-    st.divider()
-    st.caption("Full application queue")
-    _show_table(_jobs_to_frame(queue))
+    if approve_ready:
+        selected_ids = [job.id for job in queue if job.fill_status == STATUS_PREPPED]
+        approve_selected = True
+
+    if approve_selected:
+        if not selected_ids:
+            st.warning("Select at least one ready-for-review role, or use Approve all ready for review.")
+        else:
+            ok = 0
+            skipped_unready = 0
+            errors: list[str] = []
+            for job_id in selected_ids:
+                job = find_match(job_id)
+                if job is None:
+                    continue
+                if job.fill_status not in {STATUS_PREPPED, STATUS_APPLIED}:
+                    skipped_unready += 1
+                    continue
+                message = mark_submitted_and_sync(
+                    job.id,
+                    contact_person or job.contact_person,
+                    contact_email or job.contact_email,
+                    notes or job.notes,
+                )
+                if message.startswith("Synced"):
+                    ok += 1
+                else:
+                    errors.append(message)
+            if ok:
+                st.success(f"Approved and synced {ok} application(s).")
+            if skipped_unready:
+                st.info(
+                    f"Skipped {skipped_unready} selected row(s) that are not ready for review yet "
+                    "(still queued, prepping, or failed)."
+                )
+            for err in errors[:6]:
+                st.warning(err)
+            if ok:
+                st.rerun()
+
+    if skip_selected:
+        if not selected_ids:
+            st.warning("Select at least one role to skip.")
+        else:
+            for job_id in selected_ids:
+                update_match_status(job_id, fill_status=STATUS_SKIPPED)
+            st.success(f"Skipped {len(selected_ids)} role(s).")
+            st.rerun()
+
+    with st.expander("Advanced: re-queue selected for Playwright"):
+        st.caption(
+            "Only needed for failed preps or leftover pending rows. "
+            "New $150k+ matches are already auto-queued after each scrape."
+        )
+        if st.button("Send selected to Playwright", use_container_width=True):
+            st.info(queue_for_playwright(selected_ids))
+
+    st.subheader("Playwright log")
+    st.code(_tail_log(BOT_LOG_PATH, lines=50), language="text")
 
 
 def render_tracker() -> None:
@@ -401,7 +549,7 @@ def main() -> None:
     st.title("Autonomous Job Hunt Engine")
     st.caption(
         f"{name} · New Grad / Full Stack SWE · ${floor:,.0f}+ floor · "
-        f"{local_now().strftime('%A %I:%M %p %Z')}"
+        f"{local_now().strftime('%A %I:%M %p %Z')} · new matches auto-prep in Playwright"
     )
 
     running = worker_is_running()
@@ -409,7 +557,7 @@ def main() -> None:
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Monitor", "Active" if running else "Stopped")
     m2.metric("Jobs found today", len(today))
-    m3.metric("Apps prepped", count_by_status(STATUS_PREPPED, STATUS_APPLIED, STATUS_SYNCED))
+    m3.metric("Ready for review", count_by_status(STATUS_PREPPED))
     m4.metric("Sheets synced", count_by_status(STATUS_SYNCED))
 
     monitor, feed, queue, tracker = st.tabs(
@@ -446,4 +594,5 @@ def main() -> None:
         st.warning("Setup remaining: " + " ".join(warn_bits))
 
 
-main()
+if __name__ == "__main__":
+    main()

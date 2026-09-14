@@ -6,8 +6,9 @@ Glassdoor, ZipRecruiter, Google Jobs (via python-jobspy), Greenhouse, Lever,
 an optional JSearch API, and the public Simplify new-grad list.
 
 Applies a strict U.S.-only location filter, a $150k compensation floor, scores
-each posting against profile.json, and writes new matches to matches.json
-while de-duplicating via seen_jobs.json.
+each posting against profile.json, writes new matches to matches.json, and
+queues those new $150k+ roles for automatic Playwright prep (bot.py fills
+the form and pauses before Submit).
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from common import (
     load_json,
     load_profile,
     make_job_id,
+    request_auto_prep,
     save_json,
     tokenize,
     utc_now,
@@ -941,7 +943,7 @@ def persist_matches(new_jobs: list[JobPosting], seen: dict[str, Any]) -> list[Jo
         prior = queued.get(job.id) or {}
         row = job.to_dict()
         row["fill_status"] = prior.get("fill_status") or row.get("fill_status") or "pending"
-        for keep in ("notes", "contact_person", "contact_email", "applied_at", "synced_at"):
+        for keep in ("notes", "contact_person", "contact_email", "applied_at", "prepped_at", "synced_at"):
             if prior.get(keep) and not row.get(keep):
                 row[keep] = prior[keep]
         queued[job.id] = row
@@ -980,6 +982,7 @@ def discover(
     hours_old: int = 72,
     results_wanted: int = 25,
     skip_jobspy: bool = False,
+    auto_prep: bool = True,
 ) -> list[JobPosting]:
     profile = profile or load_profile()
     prefs = profile.get("preferences") or {}
@@ -1000,6 +1003,11 @@ def discover(
     seen = load_seen()
     fresh = persist_matches(matched, seen)
     log.info("Brand-new matches written: %s", len(fresh))
+    if auto_prep:
+        ready = [job.id for job in fresh if job.best_url()]
+        message = request_auto_prep(ready)
+        if message:
+            log.info("%s", message)
     return fresh
 
 
@@ -1023,6 +1031,11 @@ def parse_args() -> argparse.Namespace:
         "--prune-non-us",
         action="store_true",
         help="Drop non-U.S. locations from matches.json and exit (no scrape).",
+    )
+    parser.add_argument(
+        "--no-auto-prep",
+        action="store_true",
+        help="Discover and queue matches without launching Playwright auto-prep.",
     )
     parser.add_argument(
         "--log-level",
@@ -1054,6 +1067,7 @@ def main() -> None:
         hours_old=args.hours_old,
         results_wanted=args.results_wanted,
         skip_jobspy=args.skip_jobspy,
+        auto_prep=not args.no_auto_prep,
     )
     if not fresh:
         print("[aggregator] No new matching jobs this run. seen_jobs.json / matches.json updated.")
@@ -1066,7 +1080,17 @@ def main() -> None:
             f"{job.source:<12}  {job.company} — {job.title}"
         )
         print(f"         {job.best_url()}")
-    print(f"\nQueue saved to {MATCHES_PATH.name}. Fill forms with:  python bot.py --from-matches")
+    if args.no_auto_prep:
+        print(
+            f"\nQueue saved to {MATCHES_PATH.name}. Fill forms with:  "
+            "python bot.py --auto-prep --from-matches"
+        )
+    else:
+        print(
+            f"\nQueued {len(fresh)} $150k+ role(s) for automatic Playwright prep. "
+            "The bot fills each form and pauses before Submit — review the browser, "
+            "then bulk-approve from the Application Queue dashboard."
+        )
 
 
 if __name__ == "__main__":

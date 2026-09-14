@@ -5,8 +5,9 @@ Runs the multi-board aggregator on a timer, keeps the 9:00 PM America/Chicago
 email scheduler armed, and writes a heartbeat to worker_status.json so the
 Streamlit dashboard can show live status.
 
-Playwright form-filling is intentionally NOT run here. Headed browsers need
-a human at the keyboard; start them from the dashboard or `python bot.py`.
+New $150k+ matches are queued automatically. `discover()` launches `bot.py
+--auto-prep`, which fills forms in a visible Playwright window and pauses
+before Submit for human review.
 """
 
 from __future__ import annotations

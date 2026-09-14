@@ -11,13 +11,13 @@ Use this only for roles you intend to apply to, with your own information, and w
 | Piece | File | Role |
 | --- | --- | --- |
 | Candidate profile | `profile.json` | Name, UTD CS (Dec 2026), U.S. citizenship, GitHub, skills, $150k floor |
-| Universal scraper | `aggregator.py` | JobSpy + Greenhouse + Lever + Simplify, salary filter, resume score, `seen_jobs.json` |
+| Universal scraper | `aggregator.py` | JobSpy + Greenhouse + Lever + Simplify, salary filter, resume score, auto-queue Playwright |
 | Form filler | `bot.py` | Playwright `headless=False`, fills fields, uploads resume, **stops before Submit** |
 | Sheets tracker | `tracker_sync.py` | `gspread` append after you confirm a submission |
 | Digest | `reporter.py` | Markdown + SMTP, including Sheets sync status |
 | Clock | `scheduler.py` | 9:00 PM America/Chicago scrape + email |
-| 24/7 engine | `worker.py` | Background scrape loop + nightly schedule |
-| Dashboard | `app.py` | Streamlit UI: monitor, feed, queue, tracker |
+| 24/7 engine | `worker.py` | Background scrape loop + nightly schedule + auto-prep launch |
+| Dashboard | `app.py` | Streamlit UI: monitor, feed, bulk-review queue, tracker |
 
 Supporting files: `common.py`, `ats_companies.json`.
 
@@ -117,12 +117,12 @@ streamlit run app.py
 
 The UI has four sections:
 
-1. **Live Monitor Status** — toggle the 24/7 worker (scrape every 45 minutes, email at 9:00 PM CT).
+1. **Live Monitor Status** — toggle the 24/7 worker (scrape every 45 minutes, email at 9:00 PM CT). New $150k+ matches are queued for Playwright automatically.
 2. **Discovered Jobs Feed** — scored listings, salaries, and links from every board.
-3. **Application Queue** — **Prep with Playwright** fills the form and pauses. After you click Submit yourself, **I submitted — sync tracker** writes the Sheets row.
+3. **Application Queue** — auto-prepped roles with live status. Review the paused Playwright window, click **Submit yourself**, then **Approve selected & sync** (or **Approve all ready for review**) to write Sheets rows. There is no per-job Prep button.
 4. **Tracker Sync Status** — rows that landed in Google Sheets, plus failures to retry.
 
-Metrics at the top: jobs found today, applications prepped, monitor active/stopped.
+Metrics at the top: jobs found today, applications ready for review, monitor active/stopped.
 
 ## CLI workflow
 
@@ -141,19 +141,25 @@ Sources:
 
 A posting is kept only if it looks like New Grad SWE or Full Stack, is U.S./US-remote, meets the **$150k+** floor, and beats `preferences.min_match_score`.
 
+Each **new** match is queued and handed to `bot.py --auto-prep` unless you pass `--no-auto-prep` or set `AUTO_PREP=0` in `.env`.
+
 ```powershell
 python aggregator.py --skip-jobspy
+python aggregator.py --no-auto-prep
 ```
 
 ### Fill a form (never submits)
 
 ```powershell
 python bot.py "https://boards.greenhouse.io/example-company/jobs/1234567"
-python bot.py --from-matches
+python bot.py --auto-prep
+python bot.py --auto-prep --from-matches
 python bot.py --job-id <id>
 ```
 
-After fields are filled you will see `REVIEW REQUIRED`. Review the page, click **Submit yourself**, press Enter, then answer **y** to sync Google Sheets.
+`--auto-prep` drains the automatic queue created by a scrape: it fills fields, uploads the resume, logs **FORM READY FOR REVIEW**, and **pauses before Submit**. After you click Submit yourself, press Enter in that console — or leave the row as prepped and bulk-approve it in the dashboard.
+
+`--from-matches` without `--auto-prep` is the older interactive flow (confirm each listing).
 
 ### 24/7 worker and 9:00 PM email
 
@@ -181,13 +187,13 @@ web: streamlit run app.py --server.port=$PORT --server.address=0.0.0.0 --server.
 worker: python worker.py
 ```
 
-Set the same env vars as `.env` in the host dashboard, and upload `credentials.json` as a secret file. Playwright form filling (`headless=False`) is a **local** workflow — cloud instances have no visible browser for you to review before Submit.
+Set the same env vars as `.env` in the host dashboard, and upload `credentials.json` as a secret file. Playwright form filling (`headless=False`) is a **local** workflow — cloud instances have no visible browser for you to review before Submit. Set `AUTO_PREP=0` on cloud so the worker only discovers and queues matches.
 
 ## Safety rule
 
 `bot.py` **fills fields only**. It does not click Submit, Apply, or Send Application. Cookie banners and resume Attach buttons are the only clicks it makes.
 
-It will not invent essay answers, bypass CAPTCHAs or logins, or apply while you are away. LinkedIn Easy Apply and some Workday portals still need a manual login during the pause.
+It will not invent essay answers, bypass CAPTCHAs or logins, or click Submit while you are away. LinkedIn Easy Apply and some Workday portals still need a manual login during the pause.
 
 ## Troubleshooting
 
@@ -205,8 +211,8 @@ It will not invent essay answers, bypass CAPTCHAs or logins, or apply while you 
 automated_job/
   app.py                Streamlit dashboard
   worker.py             24/7 scrape + 9 PM scheduler
-  aggregator.py         multi-board scrape / score / de-dupe
-  bot.py                Playwright filler (no submit)
+  aggregator.py         multi-board scrape / score / de-dupe / auto-queue Playwright
+  bot.py                Playwright filler (no submit; auto-prep + review pause)
   tracker_sync.py       Google Sheets append
   reporter.py           Markdown + SMTP digest
   scheduler.py          9:00 PM trigger
@@ -215,7 +221,9 @@ automated_job/
   ats_companies.json    Greenhouse + Lever board slugs
   matches.json          generated apply queue
   seen_jobs.json        generated de-dupe state
+  prep_queue.json       generated Playwright auto-prep queue
   tracker_log.json      generated Sheets sync log
+  bot.log               generated Playwright prep log
   reports/              generated daily Markdown
   Deethyas_Resume.pdf   your resume (you provide this)
   credentials.json      Google service account (you provide this)

@@ -21,20 +21,27 @@ from playwright.sync_api import Frame, Locator, Page, Playwright, sync_playwrigh
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from common import (
-    BOT_LOCK_PATH,
     MATCHES_PATH,
     PROFILE_PATH,
+    STATUS_APPLIED,
     STATUS_FAILED,
     STATUS_PENDING,
     STATUS_PREPPED,
+    STATUS_PREPPING,
     STATUS_SKIPPED,
+    STATUS_SYNCED,
     JobPosting,
+    bot_notify,
+    clear_bot_lock,
+    enqueue_for_prep,
     find_match,
     load_match_jobs,
     load_profile,
     resume_path_or_exit,
+    take_prep_batch,
     update_match_status,
     utc_now,
+    write_bot_lock,
 )
 
 Target = Page | Frame
@@ -116,6 +123,14 @@ def parse_args() -> argparse.Namespace:
         "--from-matches",
         action="store_true",
         help="Open pending jobs from matches.json one at a time.",
+    )
+    parser.add_argument(
+        "--auto-prep",
+        action="store_true",
+        help=(
+            "Automatically fill queued $150k+ matches without confirmation prompts. "
+            "Still pauses before Submit for human review."
+        ),
     )
     parser.add_argument(
         "--job-id",
@@ -633,22 +648,37 @@ def pause_for_manual_review(page: Page, job: JobPosting | None = None) -> str:
     Returns fill_status: prepped | applied | pending.
     """
     assert_no_submit_clicked()
-    print("\n" + "=" * 72)
-    print("REVIEW REQUIRED — this bot does NOT submit applications.")
-    print("=" * 72)
-    print("The form fields have been filled. Do all of the following in the browser:")
-    print("  1. Read every auto-filled value (name, email, phone, links).")
-    print("  2. Confirm the resume upload and any authorization answers.")
-    print("  3. Complete remaining required questions yourself.")
-    print("  4. If everything looks correct, click Submit yourself.")
-    print("  5. If something looks wrong, edit or close the tab.")
-    print()
-    print("This window stays open until you come back here and press Enter.")
-    print("=" * 72 + "\n")
+    company = job.company if job else "this listing"
+    title = job.title if job else ""
+    url = job.best_url() if job else (page.url or "")
+    banner = "\n".join(
+        [
+            "",
+            "=" * 72,
+            "FORM READY FOR REVIEW — this bot does NOT submit applications.",
+            "=" * 72,
+            f"  Company : {company}",
+            f"  Role    : {title or '—'}",
+            f"  URL     : {url}",
+            "",
+            "The form fields have been filled. Do all of the following in the browser:",
+            "  1. Read every auto-filled value (name, email, phone, links).",
+            "  2. Confirm the resume upload and any authorization answers.",
+            "  3. Complete remaining required questions yourself.",
+            "  4. If everything looks correct, click Submit yourself.",
+            "  5. If something looks wrong, edit or close the tab.",
+            "",
+            "This window stays open until you come back here and press Enter.",
+            "You can also leave it prepped and bulk-approve later from the Application Queue.",
+            "=" * 72,
+            "",
+        ]
+    )
+    bot_notify(banner)
     try:
         input(">>> Press Enter in this terminal when you are finished reviewing... ")
     except (EOFError, KeyboardInterrupt):
-        print("\n[!] Interrupted — closing the browser without submitting.")
+        bot_notify("[!] Interrupted or no TTY — closing the browser without submitting.")
         return STATUS_PREPPED
 
     submitted = False
@@ -668,6 +698,9 @@ def pause_for_manual_review(page: Page, job: JobPosting | None = None) -> str:
     if submitted and job is not None:
         _sync_after_approval(job)
         return "applied"
+    bot_notify(
+        f"[*] Left {company} — {title or 'listing'} in the Application Queue as ready for review."
+    )
     return STATUS_PREPPED
 
 
@@ -690,30 +723,20 @@ def _sync_after_approval(job: JobPosting) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
-def _write_bot_lock(job_id: str = "") -> None:
-    BOT_LOCK_PATH.write_text(job_id or "running", encoding="utf-8")
-
-
-def _clear_bot_lock() -> None:
-    try:
-        BOT_LOCK_PATH.unlink(missing_ok=True)
-    except TypeError:
-        if BOT_LOCK_PATH.exists():
-            BOT_LOCK_PATH.unlink()
-    except OSError:
-        pass
-
-
 def run(
     playwright: Playwright,
     url: str,
     profile: dict[str, Any],
     job: JobPosting | None = None,
+    *,
+    release_lock: bool = True,
 ) -> str:
     ats = detect_ats(url)
-    print(f"[*] Opening {url}")
-    print(f"[*] ATS guess: {ats}")
-    _write_bot_lock(job.id if job else "")
+    bot_notify(f"[*] Opening {url}")
+    bot_notify(f"[*] ATS guess: {ats}")
+    write_bot_lock(job.id if job else "")
+    if job is not None:
+        update_match_status(job.id, fill_status=STATUS_PREPPING)
 
     browser = playwright.chromium.launch(headless=False, slow_mo=80)
     context = browser.new_context(accept_downloads=False)
@@ -741,13 +764,27 @@ def run(
         }
         warn_if_walled_garden(ats)
         handlers.get(ats, fill_generic)(page, profile)
+        if job is not None:
+            update_match_status(
+                job.id,
+                fill_status=STATUS_PREPPED,
+                prepped_at=utc_now(),
+                sheet_error="",
+            )
+            bot_notify(
+                f"[*] Form prepped for {job.company} — {job.title}. "
+                "Pausing before Submit for your review."
+            )
         status = pause_for_manual_review(page, job)
     finally:
         try:
             browser.close()
         except Exception:
             pass
-        _clear_bot_lock()
+        if release_lock:
+            clear_bot_lock()
+        else:
+            write_bot_lock("")
     return status
 
 
@@ -765,18 +802,49 @@ def load_pending_matches() -> list[JobPosting]:
     return [
         job
         for job in load_match_jobs()
-        if job.fill_status in {STATUS_PENDING, STATUS_PREPPED} and job.best_url()
+        if job.fill_status in {STATUS_PENDING, STATUS_PREPPING} and job.best_url()
     ]
 
 
 def _announce_job(job: JobPosting, index: int, total: int) -> None:
-    print("\n" + "-" * 72)
-    print(f"[{index}/{total}] {job.company} — {job.title}")
-    print(f"    source : {job.source}")
-    print(f"    score  : {job.match_score}")
-    print(f"    salary : {job.salary_label()}")
-    print(f"    url    : {job.best_url()}")
-    print("-" * 72)
+    bot_notify(
+        "\n".join(
+            [
+                "",
+                "-" * 72,
+                f"[{index}/{total}] {job.company} — {job.title}",
+                f"    source : {job.source}",
+                f"    score  : {job.match_score}",
+                f"    salary : {job.salary_label()}",
+                f"    url    : {job.best_url()}",
+                "-" * 72,
+            ]
+        )
+    )
+
+
+def _prep_one(
+    playwright: Playwright,
+    profile: dict[str, Any],
+    job: JobPosting,
+    *,
+    release_lock: bool,
+) -> str:
+    try:
+        status = run(
+            playwright,
+            job.best_url(),
+            profile,
+            job=job,
+            release_lock=release_lock,
+        )
+        if status != "applied":
+            update_match_status(job.id, fill_status=status or STATUS_PREPPED)
+        return status
+    except Exception as exc:
+        bot_notify(f"[warn] Could not fill {job.company} — {job.title}: {exc}")
+        update_match_status(job.id, fill_status=STATUS_FAILED, sheet_error=str(exc))
+        return STATUS_FAILED
 
 
 def run_from_matches(playwright: Playwright, profile: dict[str, Any], limit: int) -> None:
@@ -786,20 +854,18 @@ def run_from_matches(playwright: Playwright, profile: dict[str, Any], limit: int
     if not pending:
         sys.exit("[bot] No pending matches. Run python aggregator.py first.")
 
-    print(f"[*] {len(pending)} pending match(es) in {MATCHES_PATH.name}")
-    for index, job in enumerate(pending, start=1):
-        _announce_job(job, index, len(pending))
-        if not _confirm("Open and fill this application? [Y/n] "):
-            update_match_status(job.id, fill_status=STATUS_SKIPPED)
-            print("[*] Skipped (set fill_status back to pending to reopen).")
-            continue
-        try:
-            status = run(playwright, job.best_url(), profile, job=job)
-            if status != "applied":
-                update_match_status(job.id, fill_status=status or STATUS_PREPPED)
-        except Exception as exc:
-            print(f"[warn] Could not fill this listing: {exc}")
-            update_match_status(job.id, fill_status=STATUS_PENDING, sheet_error=str(exc))
+    bot_notify(f"[*] {len(pending)} pending match(es) in {MATCHES_PATH.name}")
+    write_bot_lock()
+    try:
+        for index, job in enumerate(pending, start=1):
+            _announce_job(job, index, len(pending))
+            if not _confirm("Open and fill this application? [Y/n] "):
+                update_match_status(job.id, fill_status=STATUS_SKIPPED)
+                bot_notify("[*] Skipped (set fill_status back to pending to reopen).")
+                continue
+            _prep_one(playwright, profile, job, release_lock=False)
+    finally:
+        clear_bot_lock()
 
 
 def run_job_id(playwright: Playwright, profile: dict[str, Any], job_id: str) -> None:
@@ -807,14 +873,85 @@ def run_job_id(playwright: Playwright, profile: dict[str, Any], job_id: str) -> 
     if job is None or not job.best_url():
         sys.exit(f"[bot] Job {job_id} was not found or has no apply URL.")
     _announce_job(job, 1, 1)
+    status = _prep_one(playwright, profile, job, release_lock=True)
+    if status == STATUS_FAILED:
+        raise RuntimeError(job.sheet_error or f"Could not fill job {job_id}")
+
+
+def _jobs_from_ids(job_ids: list[str]) -> list[JobPosting]:
+    jobs: list[JobPosting] = []
+    seen: set[str] = set()
+    skip_statuses = {STATUS_PREPPED, STATUS_APPLIED, STATUS_SYNCED, STATUS_SKIPPED}
+    for job_id in job_ids:
+        if not job_id or job_id in seen:
+            continue
+        seen.add(job_id)
+        job = find_match(job_id)
+        if job is None or not job.best_url():
+            bot_notify(f"[warn] Skipping {job_id}: missing listing or apply URL.")
+            continue
+        if job.fill_status in skip_statuses:
+            bot_notify(
+                f"[*] Skipping {job.company} — {job.title} (already {job.fill_status})."
+            )
+            continue
+        jobs.append(job)
+    return jobs
+
+
+def run_auto_prep(
+    playwright: Playwright,
+    profile: dict[str, Any],
+    limit: int,
+    *,
+    include_pending: bool = False,
+) -> None:
+    """
+    Drain the automatic prep queue. Fill each form, never click Submit, pause
+    for human review, then continue to the next queued $150k+ match.
+    """
+    write_bot_lock()
+    processed = 0
     try:
-        status = run(playwright, job.best_url(), profile, job=job)
-        if status != "applied":
-            update_match_status(job.id, fill_status=status or STATUS_PREPPED)
-    except Exception as exc:
-        print(f"[warn] Could not fill this listing: {exc}")
-        update_match_status(job.id, fill_status=STATUS_FAILED, sheet_error=str(exc))
-        raise
+        while True:
+            batch_ids = take_prep_batch()
+            if not batch_ids and include_pending and processed == 0:
+                batch_ids = [job.id for job in load_pending_matches()]
+                include_pending = False
+            if not batch_ids:
+                break
+
+            jobs = _jobs_from_ids(batch_ids)
+            leftover: list[str] = []
+            for index, job in enumerate(jobs, start=1):
+                if limit > 0 and processed >= limit:
+                    leftover.extend(remaining.id for remaining in jobs[index - 1 :])
+                    break
+                _announce_job(job, processed + 1, processed + len(jobs) - index + 1)
+                bot_notify(
+                    f"[*] Auto-prepping {job.company} — {job.title}. "
+                    "Submit stays with you."
+                )
+                _prep_one(playwright, profile, job, release_lock=False)
+                processed += 1
+
+            if leftover:
+                enqueue_for_prep(leftover)
+                bot_notify(
+                    f"[bot] Reached --limit {limit}. {len(leftover)} job(s) stay queued."
+                )
+                break
+    finally:
+        clear_bot_lock()
+
+    if processed == 0:
+        sys.exit(
+            "[bot] Auto-prep queue is empty. New $150k+ matches are queued automatically after a scrape."
+        )
+    bot_notify(
+        f"[*] Auto-prep session complete. {processed} form(s) filled and left ready for review. "
+        "Approve them from the Application Queue dashboard after you click Submit yourself."
+    )
 
 
 def main() -> None:
@@ -826,6 +963,14 @@ def main() -> None:
         print("[warn] profile.json still has placeholder contact details. Update it first.")
 
     with sync_playwright() as playwright:
+        if args.auto_prep:
+            run_auto_prep(
+                playwright,
+                profile,
+                args.limit,
+                include_pending=args.from_matches,
+            )
+            return
         if args.job_id:
             run_job_id(playwright, profile, args.job_id.strip())
             return

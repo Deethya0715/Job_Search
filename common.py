@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -27,6 +28,8 @@ WORKER_STATUS_PATH = ROOT / "worker_status.json"
 WORKER_LOG_PATH = ROOT / "worker.log"
 TRACKER_LOG_PATH = ROOT / "tracker_log.json"
 BOT_LOCK_PATH = ROOT / ".bot_running"
+BOT_LOG_PATH = ROOT / "bot.log"
+PREP_QUEUE_PATH = ROOT / "prep_queue.json"
 STOP_FLAG_PATH = ROOT / ".worker_stop"
 
 load_dotenv(ENV_PATH)
@@ -37,12 +40,23 @@ LOCAL_TZ = ZoneInfo("America/Chicago")
 GOOGLE_SHEETS_ID_DEFAULT = "1TO5rtMymBoo64X2bld2R-HqBGlWim_m7kHNcHkICtxY"
 
 # fill_status values used across aggregator, bot, tracker, and the dashboard.
-STATUS_PENDING = "pending"  # discovered, not opened in Playwright yet
-STATUS_PREPPED = "prepped"  # form filled, waiting for human Submit
+STATUS_PENDING = "pending"  # discovered, waiting for automatic Playwright prep
+STATUS_PREPPING = "prepping"  # Playwright is filling the form now
+STATUS_PREPPED = "prepped"  # form filled, waiting for human Submit / dashboard approval
 STATUS_APPLIED = "applied"  # human confirmed Submit
 STATUS_SYNCED = "synced"  # row landed in Google Sheets
 STATUS_SKIPPED = "skipped"
 STATUS_FAILED = "failed"
+
+STATUS_LABELS = {
+    STATUS_PENDING: "Queued — waiting for Playwright",
+    STATUS_PREPPING: "Prepping now",
+    STATUS_PREPPED: "Ready for review",
+    STATUS_APPLIED: "Submitted — syncing",
+    STATUS_SYNCED: "Synced to Sheets",
+    STATUS_SKIPPED: "Skipped",
+    STATUS_FAILED: "Prep failed",
+}
 
 SHEET_HEADERS = [
     "Company",
@@ -79,6 +93,7 @@ class JobPosting:
     contact_person: str = ""
     contact_email: str = ""
     applied_at: str = ""
+    prepped_at: str = ""
     synced_at: str = ""
     sheet_error: str = ""
 
@@ -373,11 +388,227 @@ def save_worker_status(**fields: Any) -> dict[str, Any]:
     status.update(fields)
     status["last_heartbeat"] = utc_now()
     status["jobs_today"] = len(jobs_found_on())
-    status["queue_size"] = count_by_status(STATUS_PENDING, STATUS_PREPPED)
+    status["queue_size"] = count_by_status(STATUS_PENDING, STATUS_PREPPING, STATUS_PREPPED)
     status["prepped"] = count_by_status(STATUS_PREPPED)
     status["synced"] = count_by_status(STATUS_SYNCED)
     save_json(WORKER_STATUS_PATH, status)
     return status
+
+
+def status_label(fill_status: str) -> str:
+    return STATUS_LABELS.get(fill_status, fill_status or "unknown")
+
+
+def auto_prep_enabled() -> bool:
+    raw = env("AUTO_PREP", "1").lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def auto_prep_limit() -> int:
+    raw = env("AUTO_PREP_LIMIT", "0")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
+def append_log_file(path: Path, message: str) -> None:
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            stamp = local_now().strftime("%H:%M:%S")
+            lines = message.splitlines() or [""]
+            for line in lines:
+                handle.write(f"{stamp} {line}\n")
+    except OSError:
+        pass
+
+
+def bot_notify(message: str) -> None:
+    """Print to the bot terminal and append bot.log so the dashboard can tail it."""
+    print(message)
+    append_log_file(BOT_LOG_PATH, message)
+
+
+def _read_bot_lock() -> dict[str, Any]:
+    if not BOT_LOCK_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(BOT_LOCK_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {"pid": None, "legacy": True}
+    return raw if isinstance(raw, dict) else {"pid": None, "legacy": True}
+
+
+def write_bot_lock(job_id: str | None = None, pid: int | None = None) -> None:
+    payload = _read_bot_lock()
+    payload.update(
+        {
+            "pid": pid if pid is not None else os.getpid(),
+            "started_at": payload.get("started_at") or utc_now(),
+            "updated_at": utc_now(),
+        }
+    )
+    if job_id is not None:
+        payload["job_id"] = job_id
+    else:
+        payload.setdefault("job_id", "")
+    save_json(BOT_LOCK_PATH, payload)
+
+
+def clear_bot_lock() -> None:
+    try:
+        BOT_LOCK_PATH.unlink(missing_ok=True)
+    except TypeError:
+        if BOT_LOCK_PATH.exists():
+            BOT_LOCK_PATH.unlink()
+    except OSError:
+        pass
+
+
+def bot_is_running() -> bool:
+    payload = _read_bot_lock()
+    if not payload:
+        return False
+    pid = payload.get("pid")
+    if pid_is_alive(pid):
+        return True
+    clear_bot_lock()
+    return False
+
+
+def bot_lock_info() -> dict[str, Any]:
+    return _read_bot_lock() if bot_is_running() else {}
+
+
+def load_prep_queue_ids() -> list[str]:
+    payload = load_json(PREP_QUEUE_PATH, {"job_ids": []})
+    ids = payload.get("job_ids") or []
+    if not isinstance(ids, list):
+        return []
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for job_id in ids:
+        if not job_id or job_id in seen:
+            continue
+        seen.add(str(job_id))
+        ordered.append(str(job_id))
+    return ordered
+
+
+def enqueue_for_prep(job_ids: list[str]) -> list[str]:
+    """Append job ids to the Playwright auto-prep queue (de-duplicated, stable order)."""
+    queued = load_prep_queue_ids()
+    seen = set(queued)
+    for job_id in job_ids:
+        if not job_id or job_id in seen:
+            continue
+        job = find_match(job_id)
+        if job is not None and job.fill_status in {
+            STATUS_PREPPED,
+            STATUS_APPLIED,
+            STATUS_SYNCED,
+            STATUS_SKIPPED,
+        }:
+            continue
+        queued.append(job_id)
+        seen.add(job_id)
+    save_json(
+        PREP_QUEUE_PATH,
+        {"job_ids": queued, "updated_at": utc_now(), "count": len(queued)},
+    )
+    return queued
+
+
+def take_prep_batch() -> list[str]:
+    """Atomically drain the auto-prep queue and return those job ids."""
+    queued = load_prep_queue_ids()
+    save_json(PREP_QUEUE_PATH, {"job_ids": [], "updated_at": utc_now(), "count": 0})
+    return queued
+
+
+def reset_orphaned_prepping() -> int:
+    """If Playwright is not running, roll crashed 'prepping' rows back to pending."""
+    if bot_is_running():
+        return 0
+    reset = 0
+    for job in load_match_jobs():
+        if job.fill_status != STATUS_PREPPING:
+            continue
+        update_match_status(job.id, fill_status=STATUS_PENDING)
+        reset += 1
+    return reset
+
+
+def spawn_auto_prep_bot() -> str:
+    """Start bot.py --auto-prep in a visible console so the human can review Submit."""
+    reset_orphaned_prepping()
+    command = [sys.executable, str(ROOT / "bot.py"), "--auto-prep"]
+    limit = auto_prep_limit()
+    if limit > 0:
+        command.extend(["--limit", str(limit)])
+
+    kwargs: dict[str, Any] = {"cwd": str(ROOT)}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+    else:
+        kwargs["start_new_session"] = True
+        log_handle = BOT_LOG_PATH.open("a", encoding="utf-8")
+        kwargs["stdout"] = log_handle
+        kwargs["stderr"] = log_handle
+        kwargs["stdin"] = subprocess.DEVNULL
+
+    process = subprocess.Popen(command, **kwargs)
+    write_bot_lock(pid=process.pid)
+    queued = load_prep_queue_ids()
+    message = (
+        f"Started Playwright auto-prep (pid {process.pid}) for {len(queued)} $150k+ role(s). "
+        "Each form is filled and paused before Submit — review the browser, then approve in the dashboard."
+    )
+    append_log_file(BOT_LOG_PATH, message)
+    append_log_file(WORKER_LOG_PATH, message)
+    return message
+
+
+def request_auto_prep(job_ids: list[str] | None = None) -> str:
+    """
+    Queue high-paying matches for Playwright and launch the filler if it is idle.
+
+    Discovery should call this with the ids of *new* matches so historical
+    pending rows are not suddenly opened in bulk.
+    """
+    if not auto_prep_enabled():
+        return ""
+
+    ids = [str(job_id) for job_id in (job_ids or []) if job_id]
+    queued = enqueue_for_prep(ids) if ids else load_prep_queue_ids()
+    if ids and queued:
+        preview = []
+        for job_id in ids[:8]:
+            job = find_match(job_id)
+            if job:
+                preview.append(f"{job.company} — {job.title}")
+        extra = f" including {', '.join(preview)}" if preview else ""
+        append_log_file(
+            BOT_LOG_PATH,
+            f"Queued {len(ids)} new $150k+ match(es) for automatic Playwright prep{extra}.",
+        )
+
+    queued = load_prep_queue_ids()
+    if not queued:
+        return ""
+
+    if bot_is_running():
+        lock = _read_bot_lock()
+        current = lock.get("job_id") or "the current listing"
+        message = (
+            f"{len(queued)} role(s) queued for Playwright. A prep window is already open "
+            f"({current}); new forms will start after you finish that review."
+        )
+        append_log_file(BOT_LOG_PATH, message)
+        append_log_file(WORKER_LOG_PATH, message)
+        return message
+
+    return spawn_auto_prep_bot()
 
 
 def load_tracker_log() -> dict[str, Any]:
