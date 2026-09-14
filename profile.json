@@ -1,0 +1,76 @@
+{
+  "first_name": "Deethya",
+  "last_name": "Janjanam",
+  "full_name": "Deethya Janjanam",
+  "email": "YOUR_EMAIL@example.com",
+  "phone": "000-000-0000",
+  "graduation_date": "December 2026",
+  "degree": "B.S. in Computer Science",
+  "school": "The University of Texas at Dallas",
+  "work_authorization": {
+    "us_citizen": true,
+    "authorized_to_work": true,
+    "requires_sponsorship": false,
+    "status": "U.S. Citizen — authorized to work in the United States; no visa sponsorship required"
+  },
+  "resume_path": "Deethyas_Resume.pdf",
+  "links": {
+    "linkedin": "https://www.linkedin.com/in/YOUR_PROFILE",
+    "github": "https://github.com/Deethya0715"
+  },
+  "skills": [
+    "Python",
+    "JavaScript",
+    "TypeScript",
+    "React",
+    "Next.js",
+    "Prisma",
+    "SQL",
+    "AI/ML",
+    "Machine Learning",
+    "U.S. Provisional Patent"
+  ],
+  "keywords": [
+    "software engineer",
+    "full stack",
+    "fullstack",
+    "new grad",
+    "university graduate",
+    "early career",
+    "web development",
+    "REST APIs",
+    "PostgreSQL",
+    "Node.js",
+    "patent"
+  ],
+  "preferences": {
+    "salary_floor": 150000,
+    "min_match_score": 40,
+    "country": "USA",
+    "locations": ["United States"],
+    "search_terms": [
+      "Software Engineer New Grad",
+      "New Grad Software Engineer",
+      "University Graduate Software Engineer",
+      "Full Stack Engineer New Grad",
+      "Early Career Software Engineer",
+      "Software Engineer University Grad 2026"
+    ],
+    "exclude_title_keywords": [
+      "senior",
+      "sr.",
+      "sr ",
+      "staff",
+      "principal",
+      "director",
+      "manager",
+      "lead",
+      "intern",
+      "internship",
+      "co-op",
+      "coop",
+      "phd",
+      "architect"
+    ]
+  }
+}
