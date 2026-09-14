@@ -19,4 +19,6 @@ worker.log
 .bot_review.json
 .worker_stop
 prep_queue.json
+ai_answer_cache.json
+cover_letters/
 *.tmp

@@ -2,9 +2,9 @@
 Streamlit control plane for the job-hunting engine.
 
 Tabs:
-  1. Live Monitor Status  — start/stop the hourly worker
+  1. Live Monitor Status  — start/stop the scrape + auto-apply worker
   2. Discovered Jobs Feed — scored listings from every board
-  3. Application Queue    — one open form at a time; edit then Submit
+  3. Application Queue    — auto-submits; CAPTCHA rows wait for you
   4. Tracker Sync Status  — rows pushed to Google Sheets
 """
 
@@ -30,6 +30,7 @@ try:
         STATUS_SYNCED,
         WORKER_LOG_PATH,
         auto_submit_enabled,
+        ai_answers_enabled,
         bot_is_running,
         bot_lock_info,
         count_by_status,
@@ -46,6 +47,7 @@ try:
         load_worker_status,
         local_now,
         request_auto_prep,
+        scrape_interval_minutes,
         service_account_path,
         set_review_action,
         status_label,
@@ -179,7 +181,10 @@ def mark_submitted_and_sync(job_id: str, contact_person: str, contact_email: str
         )
         return f"Synced {job.company} — {job.title} to Google Sheets."
     except Exception as exc:
-        return f"Could not sync Google Sheets: {exc}"
+        return (
+            f"Marked {job.company} — {job.title} as submitted, "
+            f"but Google Sheets sync failed: {exc}"
+        )
 
 
 def render_monitor() -> None:
@@ -203,7 +208,10 @@ def render_monitor() -> None:
     st.markdown(f"### Engine {pill}", unsafe_allow_html=True)
     st.caption(
         status.get("message")
-        or "Scrapes hourly from 8:00 AM to 7:00 PM CT. Email digest at 9:00 PM CT."
+        or (
+            f"Scrapes every {scrape_interval_minutes()} min from 8:00 AM to 7:00 PM CT. "
+            "Matching Greenhouse/Lever/Ashby roles auto-submit unless a CAPTCHA appears."
+        )
     )
 
     left, right = st.columns([1, 2])
@@ -213,7 +221,8 @@ def render_monitor() -> None:
             try:
                 pid = start_worker_process(initial_scrape=True)
                 st.success(
-                    f"Worker started (pid {pid}). Scrapes hourly 8:00 AM–7:00 PM CT."
+                    f"Worker started (pid {pid}). Scrapes every {scrape_interval_minutes()} min "
+                    "8:00 AM–7:00 PM CT and auto-applies Greenhouse/Lever/Ashby."
                 )
                 st.rerun()
             except Exception as exc:
@@ -231,7 +240,7 @@ def render_monitor() -> None:
 
                     fresh = discover(load_profile())
                 extra = (
-                    f" Playwright will open {len(fresh)} new matching Greenhouse/Lever/Ashby role(s) one at a time."
+                    f" Playwright will auto-apply {len(fresh)} new matching Greenhouse/Lever/Ashby role(s)."
                     if fresh
                     else ""
                 )
@@ -312,21 +321,26 @@ def render_queue() -> None:
     waiting_ids = load_prep_queue_ids()
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Queued for prep", pending_n)
-    c2.metric("Open in browser", reviewing_n or prepping_n)
-    c3.metric("Ready for review", ready_n)
+    c1.metric("Queued", pending_n)
+    c2.metric("CAPTCHA / in browser", reviewing_n or prepping_n)
+    c3.metric("Needs you", ready_n)
     c4.metric("Submitted / failed", f"{applied_n} / {failed_n}")
 
-    st.info(
-        "Playwright opens **one** Greenhouse/Lever/Ashby form at a time, fills what it can, "
-        "and leaves Chromium open. Edit anything, click **Submit yourself**, then use the "
-        "buttons below. The next role will not open until this one is finished."
-    )
-
     if auto_submit_enabled():
-        st.warning(
-            "AUTO_SUBMIT is on in `.env`. Incomplete auto-submits still pause for you; "
-            "set AUTO_SUBMIT=0 if you always want to click Submit yourself."
+        st.success(
+            "Auto-submit is on. Playwright fills Greenhouse/Lever/Ashby (profile + AI essays), "
+            "clicks Submit with **no confirmation**, and writes Google Sheets. "
+            "It only pauses if a **CAPTCHA** is on the page."
+        )
+        if not ai_answers_enabled():
+            st.warning(
+                "No LLM API key yet. Set `OPENAI_API_KEY` (or Anthropic/Gemini) in `.env` "
+                "so leftover essays and cover letters are written automatically. "
+                "Cover letters still use a template if no key is set."
+            )
+    else:
+        st.info(
+            "AUTO_SUBMIT is off. Forms are filled and left open for you to click Submit."
         )
 
     if bot_is_running():
@@ -338,7 +352,13 @@ def render_queue() -> None:
             if current
             else (lock.get("job_id") or signal.get("job_id") or "a listing")
         )
-        st.success(f"Chromium is on **{current_label}**. Edit that window, then Submit.")
+        if str(signal.get("reason") or "") == "captcha":
+            st.warning(
+                f"CAPTCHA on **{current_label}**. Solve it in Chromium and click Submit. "
+                "Then use the buttons below if the thank-you page is not detected."
+            )
+        else:
+            st.info(f"Playwright is on **{current_label}**.")
         r1, r2, r3 = st.columns(3)
         if r1.button("I submitted — sync & open next", type="primary", use_container_width=True):
             set_review_action("submitted")
@@ -353,15 +373,15 @@ def render_queue() -> None:
             st.info("Keeping this row as ready for review. Next form will open.")
             st.rerun()
     elif waiting_ids:
-        st.info(f"{len(waiting_ids)} role(s) are queued. Only the first will open until you finish it.")
-        if st.button("Open the next application", use_container_width=False):
+        st.info(f"{len(waiting_ids)} role(s) queued for auto-apply.")
+        if st.button("Start auto-apply now", use_container_width=False):
             st.info(request_auto_prep() or "Queue is already empty.")
             st.rerun()
 
     if not queue:
         st.info(
-            "Queue is empty. Start the monitor to discover $100k+ New Grad / Full Stack roles. "
-            "New matches are opened one at a time in Playwright so you can edit and Submit."
+            "Queue is empty. Start the monitor — it scrapes on an interval and auto-submits "
+            "Greenhouse/Lever/Ashby matches (pauses only for CAPTCHA)."
         )
         st.subheader("Playwright log")
         st.code(_tail_log(BOT_LOG_PATH), language="text")
@@ -369,20 +389,20 @@ def render_queue() -> None:
 
     filters = {
         "All active": None,
-        "Open in browser": {STATUS_REVIEWING, STATUS_PREPPING},
-        "Ready for review": {STATUS_PREPPED},
+        "CAPTCHA / in browser": {STATUS_REVIEWING, STATUS_PREPPING},
+        "Needs you": {STATUS_PREPPED},
         "Queued": {STATUS_PENDING},
         "Submitted (not synced)": {STATUS_APPLIED},
-        "Prep failed": {STATUS_FAILED},
+        "Apply failed": {STATUS_FAILED},
     }
     filter_label = st.selectbox("Show", list(filters))
     wanted = filters[filter_label]
     visible = [job for job in queue if wanted is None or job.fill_status in wanted]
 
     st.caption(
-        "Playwright opens one Greenhouse/Lever/Ashby form at a time and waits for you. "
-        "Workday, TikTok, Amazon, Apple, Google, and similar portals are skipped "
-        "(they need a login). Failed rows can be re-queued below."
+        "Greenhouse, Lever, and Ashby auto-submit. Workday, LinkedIn Easy Apply, Amazon, "
+        "Apple, Google, and similar login portals are skipped. CAPTCHA rows stay open until "
+        "you solve them. Failed rows can be re-queued below."
     )
 
     rows = []
@@ -448,7 +468,7 @@ def render_queue() -> None:
         "Approve selected & sync",
         type="primary",
         use_container_width=True,
-        help="For leftovers you submitted yourself. Auto-submit already writes Sheets when it succeeds.",
+        help="Use this when you submitted in another browser tab via Job link. Marks Applied and writes Sheets.",
     )
     approve_ready = a2.button(
         "Approve all ready for review",
@@ -483,12 +503,12 @@ def render_queue() -> None:
                     contact_email or job.contact_email,
                     notes or job.notes,
                 )
-                if message.startswith("Synced"):
+                if message.startswith("Synced") or message.startswith("Marked"):
                     ok += 1
-                else:
+                if not message.startswith("Synced"):
                     errors.append(message)
             if ok:
-                st.success(f"Approved and synced {ok} application(s).")
+                st.success(f"Approved {ok} application(s).")
             if skipped_unready:
                 st.info(
                     f"Skipped {skipped_unready} selected row(s) that are not ready for review yet "
@@ -553,7 +573,7 @@ def render_tracker() -> None:
     log_payload = load_tracker_log()
     rows = log_payload.get("rows") or []
     if not rows:
-        st.info("No tracker rows yet. Confirm a submission after Playwright review.")
+        st.info("No tracker rows yet. Auto-submit writes a row after each successful apply.")
         return
 
     frame = pd.DataFrame(rows)
@@ -616,7 +636,7 @@ def main() -> None:
     st.caption(
         f"{name} · New Grad / Full Stack SWE · ${floor:,.0f}+ floor "
         f"(prefer ${preferred:,.0f}) · "
-        f"{local_now().strftime('%A %I:%M %p %Z')} · One application at a time — edit, then Submit"
+        f"{local_now().strftime('%A %I:%M %p %Z')} · Auto-submit on — CAPTCHA is the only pause"
     )
 
     running = False
@@ -629,7 +649,7 @@ def main() -> None:
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Monitor", "Active" if running else "Stopped")
     m2.metric("Jobs found today", len(today))
-    m3.metric("Ready for review", count_by_status(STATUS_PREPPED))
+    m3.metric("Needs you (CAPTCHA)", count_by_status(STATUS_REVIEWING))
     m4.metric("Sheets synced", count_by_status(STATUS_SYNCED))
 
     monitor, feed, queue, tracker = st.tabs(
@@ -651,17 +671,22 @@ def main() -> None:
 
     st.divider()
     resume_ok = profile.get("_resume_exists")
+    transcript_ok = profile.get("_transcript_exists")
     email = str(profile.get("email") or "")
     placeholder_email = "YOUR_EMAIL" in email or "example.com" in email
     warn_bits = []
     if not resume_ok:
         warn_bits.append("Place `Deethyas_Resume.pdf` in this folder.")
+    if profile.get("transcript_path") and not transcript_ok:
+        warn_bits.append("Place `Sem5_Transcript.pdf` in this folder.")
     if placeholder_email:
         warn_bits.append("Update `email` / `phone` / LinkedIn in profile.json.")
     if not env("SMTP_USER"):
         warn_bits.append("Set SMTP_USER and SMTP_PASSWORD in `.env` for the 9:00 PM email.")
     if not service_account_path().is_file():
         warn_bits.append("Add `credentials.json` and share the Google Sheet with the service account.")
+    if auto_submit_enabled() and not ai_answers_enabled():
+        warn_bits.append("Add OPENAI_API_KEY (or Anthropic/Gemini) in `.env` so leftover questions get AI answers.")
     if warn_bits:
         st.warning("Setup remaining: " + " ".join(warn_bits))
 

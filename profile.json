@@ -17,6 +17,23 @@
   "graduation_month": "December",
   "graduation_month_number": "12",
   "age": 18,
+  "pronouns": "she/her",
+  "gender": "female",
+  "years_of_experience": "1",
+  "willing_to_relocate": true,
+  "open_to_remote": true,
+  "currently_student": true,
+  "currently_employed": false,
+  "self_identification": {
+    "gender": "female",
+    "pronouns": "she/her",
+    "veteran": false,
+    "disability": true,
+    "disability_status": "yes_have_or_had",
+    "race": "decline",
+    "ethnicity": "decline",
+    "hispanic": "decline"
+  },
   "current_employer": "N/A",
   "prior_employers": ["CBRE"],
   "degree": "B.S. in Computer Science",
@@ -25,9 +42,19 @@
     "us_citizen": true,
     "authorized_to_work": true,
     "requires_sponsorship": false,
-    "status": "U.S. Citizen — authorized to work in the United States; no visa sponsorship required"
+    "status": "U.S. Citizen — authorized to work in the United States; no visa sponsorship required",
+    "export_control_status": "A United States citizen or national"
+  },
+  "how_heard": "Google job search",
+  "previously_applied": false,
+  "conflict_of_interest": false,
+  "security_clearance": {
+    "eligible": true,
+    "holds_now": false,
+    "level_held": "N/A - have never held U.S. security clearance"
   },
   "resume_path": "Deethyas_Resume.pdf",
+  "transcript_path": "Sem5_Transcript.pdf",
   "links": {
     "linkedin": "https://www.linkedin.com/in/deethyajanjanam/",
     "github": "https://github.com/Deethya0715"

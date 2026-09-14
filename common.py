@@ -52,22 +52,22 @@ GOOGLE_SHEETS_ID_DEFAULT = "1TO5rtMymBoo64X2bld2R-HqBGlWim_m7kHNcHkICtxY"
 # fill_status values used across aggregator, bot, tracker, and the dashboard.
 STATUS_PENDING = "pending"  # discovered, waiting for automatic Playwright prep
 STATUS_PREPPING = "prepping"  # Playwright is filling the form now
-STATUS_REVIEWING = "reviewing"  # browser open; human is editing / submitting
-STATUS_PREPPED = "prepped"  # form filled, waiting for human Submit / dashboard approval
-STATUS_APPLIED = "applied"  # human confirmed Submit
+STATUS_REVIEWING = "reviewing"  # CAPTCHA or other human-only blocker
+STATUS_PREPPED = "prepped"  # leftover; should be rare with AUTO_SUBMIT
+STATUS_APPLIED = "applied"  # submitted, Sheets sync in flight
 STATUS_SYNCED = "synced"  # row landed in Google Sheets
 STATUS_SKIPPED = "skipped"
 STATUS_FAILED = "failed"
 
 STATUS_LABELS = {
-    STATUS_PENDING: "Queued — waiting for Playwright",
-    STATUS_PREPPING: "Prepping now",
-    STATUS_REVIEWING: "Open in browser — edit then Submit",
-    STATUS_PREPPED: "Ready for review",
-    STATUS_APPLIED: "Submitted — syncing",
+    STATUS_PENDING: "Queued — auto-apply",
+    STATUS_PREPPING: "Filling / submitting now",
+    STATUS_REVIEWING: "CAPTCHA — submit this one",
+    STATUS_PREPPED: "Needs you (could not auto-submit)",
+    STATUS_APPLIED: "Submitted — syncing Sheets",
     STATUS_SYNCED: "Synced to Sheets",
     STATUS_SKIPPED: "Skipped",
-    STATUS_FAILED: "Prep failed",
+    STATUS_FAILED: "Apply failed",
 }
 
 SHEET_HEADERS = [
@@ -166,6 +166,19 @@ def local_today() -> str:
     return local_now().date().isoformat()
 
 
+def _bind_profile_file(profile: dict[str, Any], key: str, prefix: str) -> None:
+    raw = str(profile.get(key) or "").strip()
+    if not raw:
+        profile[f"_{prefix}_abs"] = ""
+        profile[f"_{prefix}_exists"] = False
+        return
+    path = Path(raw)
+    if not path.is_absolute():
+        path = (ROOT / path).resolve()
+    profile[f"_{prefix}_abs"] = str(path)
+    profile[f"_{prefix}_exists"] = path.is_file()
+
+
 def load_profile(path: Path = PROFILE_PATH) -> dict[str, Any]:
     if not path.exists():
         sys.exit(f"[error] Missing profile file: {path}")
@@ -173,11 +186,8 @@ def load_profile(path: Path = PROFILE_PATH) -> dict[str, Any]:
     with path.open(encoding="utf-8") as handle:
         profile = json.load(handle)
 
-    resume = Path(profile["resume_path"])
-    if not resume.is_absolute():
-        resume = (ROOT / resume).resolve()
-    profile["_resume_abs"] = str(resume)
-    profile["_resume_exists"] = resume.is_file()
+    _bind_profile_file(profile, "resume_path", "resume")
+    _bind_profile_file(profile, "transcript_path", "transcript")
 
     prefs = profile.setdefault("preferences", {})
     prefs.setdefault("salary_floor", DEFAULT_SALARY_FLOOR)
@@ -421,8 +431,23 @@ def auto_prep_enabled() -> bool:
 
 
 def auto_submit_enabled() -> bool:
-    raw = env("AUTO_SUBMIT", "0").lower()
+    raw = env("AUTO_SUBMIT", "1").lower()
     return raw in {"1", "true", "yes", "on"}
+
+
+def ai_answers_enabled() -> bool:
+    raw = env("AI_ANSWERS", "1").lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return bool(env("OPENAI_API_KEY") or env("ANTHROPIC_API_KEY") or env("GEMINI_API_KEY"))
+
+
+def scrape_interval_minutes() -> int:
+    raw = env("SCRAPE_INTERVAL_MINUTES", "20")
+    try:
+        return max(5, min(120, int(raw)))
+    except ValueError:
+        return 20
 
 
 def playwright_headless() -> bool:
@@ -701,7 +726,7 @@ def spawn_auto_prep_bot() -> str:
     message = (
         f"Started Playwright {action} (pid {process.pid}) for {len(queued)} matching role(s). "
         + (
-            "Forms are filled and submitted on Greenhouse/Lever/Ashby."
+            "Forms are filled, AI-answered, and submitted unless a CAPTCHA appears."
             if auto_submit_enabled()
             else "One form stays open until you edit and Submit it; the next role waits."
         )

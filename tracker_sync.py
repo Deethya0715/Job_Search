@@ -175,7 +175,7 @@ def append_application(
             log.info("Synced %s — %s", job.company, job.title)
     except Exception as exc:
         result["error"] = str(exc)
-        job.fill_status = STATUS_FAILED
+        job.fill_status = STATUS_APPLIED
         job.sheet_error = str(exc)
         log.warning("Sheet sync failed for %s: %s", job.id, exc)
 

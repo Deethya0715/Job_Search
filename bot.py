@@ -2,8 +2,8 @@
 Job-application form filler.
 
 Opens Greenhouse, Lever, and Ashby listings, fills fields from profile.json,
-and uploads Deethyas_Resume.pdf. One application stays open until you edit
-and Submit it; the next role does not start until this one is finished.
+uploads Deethyas_Resume.pdf, Sem5_Transcript.pdf, and an AI cover letter when the form asks,
+writes leftover answers with an LLM, and submits unless a CAPTCHA is on the page.
 """
 
 from __future__ import annotations
@@ -26,6 +26,13 @@ except Exception:
 from playwright.sync_api import Frame, Locator, Page, Playwright, sync_playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from ai_answers import (
+    ai_answers_enabled,
+    ai_cover_letters_enabled,
+    answer_questions,
+    cover_letter_pdf_path,
+    generate_cover_letter,
+)
 from common import (
     ANSWERS_PATH,
     MATCHES_PATH,
@@ -112,11 +119,17 @@ HEAR_ABOUT_LABELS = (
     "how did you hear",
     "how did you find",
     "how you heard",
+    "how did you learn about",
+    "where did you hear",
     "referral source",
     "source of hire",
 )
 HEAR_ABOUT_ANSWERS = (
+    "google job search",
+    "google",
+    "indeed",
     "linkedin",
+    "handshake",
     "university",
     "career site",
     "company website",
@@ -126,14 +139,72 @@ HEAR_ABOUT_ANSWERS = (
     "internet",
 )
 THANKS_HINTS = (
+    "thank you for applying",
     "thanks for applying",
+    "thank you for your application",
     "thanks for taking the time",
     "application received",
     "application has been submitted",
+    "application submitted",
     "successfully submitted",
     "we received your application",
+    "we've received your application",
+    "we have received your application",
     "your application was sent",
     "your application has been received",
+)
+CONFIRMATION_URL_HINTS = (
+    "confirmation",
+    "application_confirmation",
+    "thanks-for-applying",
+    "thank-you",
+)
+CONFIRMATION_SELECTORS = (
+    "#flash_notice",
+    ".flash",
+    "#application_confirmation",
+    ".application--confirmation",
+    "[data-provides='confirmation']",
+)
+CAPTCHA_FRAME_BITS = (
+    "recaptcha",
+    "hcaptcha",
+    "h-captcha",
+    "challenges.cloudflare.com",
+    "turnstile",
+    "arkoselabs",
+    "funcaptcha",
+    "geo.captcha-delivery.com",
+)
+CAPTCHA_SELECTORS = (
+    "iframe[src*='recaptcha']",
+    "iframe[title*='reCAPTCHA' i]",
+    "iframe[src*='hcaptcha']",
+    "iframe[src*='turnstile']",
+    ".g-recaptcha",
+    "#g-recaptcha",
+    ".h-captcha",
+    ".cf-turnstile",
+    "#cf-challenge-running",
+)
+CAPTCHA_TEXT_HINTS = (
+    "i'm not a robot",
+    "im not a robot",
+    "verify you are human",
+    "complete the captcha",
+    "please verify you are a human",
+    "checking your browser before accessing",
+    "select all images",
+    "select all squares",
+    "solve this puzzle",
+)
+AI_SKIP_FIELD_BITS = (
+    "password",
+    "captcha",
+    "resume",
+    "curriculum vitae",
+    "dropbox",
+    "choose file",
 )
 
 # Human-readable field aliases used for label / name / placeholder matching.
@@ -251,6 +322,26 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "availability date",
         "date available",
     ),
+    "pronouns": ("pronouns", "preferred pronouns", "personal pronouns"),
+    "salary": (
+        "salary expectation",
+        "expected salary",
+        "desired salary",
+        "compensation expectation",
+        "expected compensation",
+        "desired compensation",
+        "salary requirements",
+        "compensation requirements",
+        "desired pay",
+        "expected pay",
+    ),
+    "years_of_experience": (
+        "years of experience",
+        "years of professional",
+        "years of relevant",
+        "total years of experience",
+        "how many years",
+    ),
 }
 
 OFFER_DEADLINE_LABELS = (
@@ -327,6 +418,25 @@ PREVIOUS_EMPLOYEE_LABELS = (
     "interned with us",
 )
 
+YESNO_SKIP_BITS = (
+    "export control",
+    "protected individual",
+    "security clearance",
+    "clearance eligibility",
+    "clearance level",
+    "conflict of interest",
+    "previously applied",
+    "applied to a position",
+    "1324b",
+    "immigration and naturalization",
+)
+
+
+def _skip_generic_yesno(text: str) -> bool:
+    blob = " ".join((text or "").lower().split())
+    return any(bit in blob for bit in YESNO_SKIP_BITS)
+
+
 AGE_18_YES_LABELS = (
     "at least 18",
     "18 years of age or older",
@@ -337,6 +447,57 @@ AGE_18_YES_LABELS = (
     "age of 18",
     "are you 18",
 )
+
+GENDER_LABELS = ("gender identity", "gender", "sex")
+PRONOUN_CHOICE_LABELS = ("pronouns", "preferred pronouns")
+VETERAN_LABELS = (
+    "veteran status",
+    "protected veteran",
+    "veteran",
+    "military status",
+    "served in the military",
+)
+VETERAN_YESNO_LABELS = (
+    "are you a veteran",
+    "are you a protected veteran",
+    "have you ever served",
+    "are you a disabled veteran",
+)
+DISABILITY_LABELS = (
+    "disability status",
+    "voluntary self-identification of disability",
+    "have a disability",
+    "ofccp",
+    "section 503",
+    "disability",
+)
+RACE_LABELS = ("race/ethnicity", "race or ethnicity", "racial identity", "ethnicity", "race")
+HISPANIC_LABELS = ("hispanic or latino", "hispanic/latino", "hispanic", "latino")
+FEMALE_TOKENS = ("female", "woman")
+PRONOUN_TOKENS = ("she/her", "she / her", "she, her")
+NOT_VETERAN_TOKENS = (
+    "i am not a protected veteran",
+    "i am not a veteran",
+    "not a protected veteran",
+    "no, i am not a veteran",
+    "i have never served",
+)
+DISABILITY_YES_TOKENS = (
+    "yes, i have a disability, or have a history",
+    "yes, i have a disability, or have had",
+    "yes, i have a disability (or previously",
+    "yes, i have a disability",
+    "i have a disability, or have had",
+    "i have a disability (or previously",
+)
+EEO_CHOICE_IDS = {
+    "gender",
+    "pronouns",
+    "veteran",
+    "disability",
+    "race",
+    "hispanic",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -531,14 +692,91 @@ def open_application_form(page: Page) -> None:
 
 
 def submission_looks_successful(page: Page) -> bool:
-    """True only on a confirmation page — never while the application form is still up."""
-    if form_fields_present(page):
-        return False
+    """True on a confirmation page. Greenhouse says 'Thank you for applying', not 'thanks'."""
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        url = ""
+    if any(hint in url for hint in CONFIRMATION_URL_HINTS):
+        return True
+
+    for selector in CONFIRMATION_SELECTORS:
+        try:
+            node = page.locator(selector).first
+            if node.count() and node.is_visible():
+                notice = " ".join((node.inner_text(timeout=1_500) or "").lower().split())
+                if notice and any(hint in notice for hint in THANKS_HINTS):
+                    return True
+        except Exception:
+            continue
+
     try:
         text = " ".join((page.locator("body").inner_text(timeout=3_000) or "").lower().split())
     except Exception:
         text = ""
     return any(hint in text for hint in THANKS_HINTS)
+
+
+def captcha_present(page: Page) -> bool:
+    """True when a human must solve a visible CAPTCHA / bot-check before Submit.
+
+    Ignores invisible reCAPTCHA v3 badges and hidden g-recaptcha-response fields.
+    """
+    frames: list[Target] = [page]
+    try:
+        frames.extend(page.frames)
+    except Exception:
+        pass
+    for root in frames:
+        try:
+            url = (getattr(root, "url", "") or "").lower()
+        except Exception:
+            url = ""
+        if any(
+            bit in url
+            for bit in (
+                "challenges.cloudflare.com",
+                "geo.captcha-delivery.com",
+                "arkoselabs",
+                "funcaptcha",
+            )
+        ):
+            return True
+        for selector in (
+            "iframe[src*='recaptcha']",
+            "iframe[src*='hcaptcha']",
+            "iframe[src*='turnstile']",
+            "iframe[src*='challenges.cloudflare']",
+            ".h-captcha",
+            ".cf-turnstile",
+            "#cf-challenge-running",
+        ):
+            try:
+                loc = root.locator(selector)
+                total = min(loc.count(), 8)
+            except Exception:
+                total = 0
+            for index in range(total):
+                node = loc.nth(index)
+                try:
+                    if not node.is_visible():
+                        continue
+                    box = node.bounding_box()
+                except Exception:
+                    continue
+                if box and box.get("width", 0) >= 160 and box.get("height", 0) >= 60:
+                    return True
+        try:
+            html = (root.content() if hasattr(root, "content") else "") or ""
+        except Exception:
+            html = ""
+        if "cf-challenge-running" in html.lower() or "cf-browser-verification" in html.lower():
+            return True
+    try:
+        text = " ".join((page.locator("body").inner_text(timeout=2_000) or "").lower().split())
+    except Exception:
+        text = ""
+    return any(hint in text for hint in CAPTCHA_TEXT_HINTS)
 
 
 def visible_invalid_fields(page: Page) -> list[str]:
@@ -615,43 +853,105 @@ def click_continue_control(page: Page) -> bool:
     return click_role_button(page, CONTINUE_PATTERN)
 
 
-def decline_self_identify(page: Page) -> int:
+def fill_self_identify(page: Page) -> int:
+    """Fill EEO / self-ID from profile.json (female, not a veteran, disability have-or-had)."""
+    profile = load_json(PROFILE_PATH, {})
+    ident = profile.get("self_identification") or {}
+    gender = str(ident.get("gender") or profile.get("gender") or "female").lower()
+    veteran = bool(ident.get("veteran", False))
+    disability = bool(ident.get("disability", True))
+    race_mode = str(ident.get("race") or ident.get("ethnicity") or "decline").lower()
+
+    gender_tokens = FEMALE_TOKENS if gender in {"female", "woman"} else (gender,)
+    veteran_tokens = NOT_VETERAN_TOKENS if not veteran else (
+        "i identify as one or more",
+        "i am a protected veteran",
+        "yes, i am a veteran",
+    )
+    if disability:
+        disability_tokens = DISABILITY_YES_TOKENS
+        disability_yn = "yes"
+    else:
+        disability_tokens = (
+            "no, i don't have a disability",
+            "no, i do not have a disability",
+            "i don't have a disability",
+            "i do not have a disability",
+        )
+        disability_yn = "no"
+    race_tokens = DECLINE_EEO_TOKENS if race_mode in {"decline", "prefer not", ""} else (race_mode,)
+
     answered = 0
     for root in application_roots(page):
-        selects = root.locator("select")
+        answered += answer_choice_question(root, GENDER_LABELS, gender_tokens)
+        answered += answer_choice_question(root, PRONOUN_CHOICE_LABELS, PRONOUN_TOKENS)
+        answered += answer_yes_no_question(root, VETERAN_YESNO_LABELS, "yes" if veteran else "no")
+        answered += answer_choice_question(root, VETERAN_LABELS, veteran_tokens)
+        answered += answer_yes_no_question(root, DISABILITY_LABELS, disability_yn)
+        answered += answer_choice_question(root, DISABILITY_LABELS, disability_tokens)
+        answered += answer_choice_question(root, RACE_LABELS, race_tokens)
+        answered += answer_choice_question(root, HISPANIC_LABELS, DECLINE_EEO_TOKENS)
+        answered += _fill_named_eeo_selects(
+            root, gender_tokens, veteran_tokens, disability_tokens, race_tokens
+        )
+    if answered:
+        print(
+            f"  filled {answered} self-identify answer(s) "
+            f"(gender={gender}, veteran={'yes' if veteran else 'no'}, "
+            f"disability={'yes/have-or-had' if disability else 'no'}; race={race_mode})."
+        )
+    return answered
+
+
+def _fill_named_eeo_selects(
+    root: Target,
+    gender_tokens: tuple[str, ...],
+    veteran_tokens: tuple[str, ...],
+    disability_tokens: tuple[str, ...],
+    race_tokens: tuple[str, ...],
+) -> int:
+    filled = 0
+    pairs = (
+        ("select#gender, select[name*='gender' i], select[id*='gender' i]", gender_tokens),
+        (
+            "select#veteran_status, select[name*='veteran' i], select[id*='veteran' i]",
+            veteran_tokens,
+        ),
+        (
+            "select#disability_status, select[name*='disability' i], select[id*='disability' i]",
+            disability_tokens,
+        ),
+        (
+            "select#race, select[name*='race' i], select[id*='race' i], "
+            "select#ethnicity, select[name*='ethnicity' i]",
+            race_tokens,
+        ),
+        (
+            "select#hispanic_ethnicity, select[name*='hispanic' i], select[id*='hispanic' i]",
+            DECLINE_EEO_TOKENS,
+        ),
+    )
+    for selector, wanted in pairs:
         try:
-            total = min(selects.count(), 80)
+            loc = root.locator(selector)
+            total = min(loc.count(), 12)
         except Exception:
-            total = 0
+            continue
         for index in range(total):
-            select = selects.nth(index)
+            select = loc.nth(index)
             try:
                 if not select.is_visible():
                     continue
-                context = f"{attr_blob(select)} {associated_label_text(root, select)}"
-                if "gender" in context or "race" in context or "veteran" in context or "ethnicity" in context or "disability" in context or "hispanic" in context:
-                    if select_native_option(select, DECLINE_EEO_TOKENS):
-                        answered += 1
+                if select_native_option(select, wanted):
+                    filled += 1
             except Exception:
                 continue
-        groups = root.locator("fieldset, [role='group'], .field, .form-group")
-        try:
-            group_count = min(groups.count(), 120)
-        except Exception:
-            group_count = 0
-        for index in range(group_count):
-            group = groups.nth(index)
-            try:
-                text = " ".join((group.inner_text() or "").split()).lower()
-            except Exception:
-                continue
-            if not any(token in text for token in ("gender", "race", "veteran", "ethnicity", "disability", "hispanic")):
-                continue
-            if click_matching_choice(group, DECLINE_EEO_TOKENS):
-                answered += 1
-    if answered:
-        print(f"  declined {answered} self-identify question(s).")
-    return answered
+    return filled
+
+
+def decline_self_identify(page: Page) -> int:
+    """Back-compat alias: we now answer self-ID instead of declining it."""
+    return fill_self_identify(page)
 
 
 def check_consent_boxes(page: Page) -> int:
@@ -694,23 +994,7 @@ def check_consent_boxes(page: Page) -> int:
 def answer_hear_about(page: Page) -> int:
     answered = 0
     for root in application_roots(page):
-        selects = root.locator("select")
-        try:
-            total = min(selects.count(), 80)
-        except Exception:
-            total = 0
-        for index in range(total):
-            select = selects.nth(index)
-            try:
-                if not select.is_visible():
-                    continue
-                context = f"{attr_blob(select)} {associated_label_text(root, select)}"
-                if looks_like(context, HEAR_ABOUT_LABELS) and select_native_option(
-                    select, HEAR_ABOUT_ANSWERS
-                ):
-                    answered += 1
-            except Exception:
-                continue
+        answered += answer_choice_question(root, HEAR_ABOUT_LABELS, HEAR_ABOUT_ANSWERS)
     if answered:
         print(f"  answered {answered} 'how did you hear' question(s).")
     return answered
@@ -720,13 +1004,18 @@ def submit_filled_application(
     page: Page,
     profile: dict[str, Any] | None = None,
     job: JobPosting | None = None,
-) -> bool:
-    """Click Continue/Next through multi-step ATS forms, then Submit."""
+) -> str:
+    """Click Continue/Next, then Submit. Returns submitted | captcha | failed."""
     for step in range(8):
         dismiss_cookie_banners(page)
-        decline_self_identify(page)
+        if captcha_present(page):
+            print("[*] CAPTCHA appeared before Submit.")
+            return "captcha"
+        fill_self_identify(page)
         check_consent_boxes(page)
         answer_hear_about(page)
+        if profile is not None:
+            fill_remaining_with_ai(page, profile, job)
 
         if click_continue_control(page):
             print(f"  clicked Continue/Next (step {step + 1}).")
@@ -735,31 +1024,41 @@ def submit_filled_application(
             except PlaywrightTimeoutError:
                 pass
             time.sleep(0.8)
+            if captcha_present(page):
+                return "captcha"
             if profile is not None:
                 fill_application(page, profile, job)
+                fill_remaining_with_ai(page, profile, job)
             continue
 
+        if captcha_present(page):
+            return "captcha"
         if not click_submit_control(page):
-            return False
+            return "failed"
         try:
             page.wait_for_load_state("networkidle", timeout=12_000)
         except PlaywrightTimeoutError:
             pass
         time.sleep(1.2)
+        if captcha_present(page):
+            print("[*] CAPTCHA appeared after Submit.")
+            return "captcha"
         if submission_looks_successful(page):
             print("[*] Submission confirmed on the page.")
-            return True
+            return "submitted"
         invalid = visible_invalid_fields(page)
         if invalid:
             preview = "; ".join(invalid[:6])
             print(f"[warn] Submit clicked but required fields are still invalid: {preview}")
-            if step < 2:
+            if profile is not None:
+                fill_remaining_with_ai(page, profile, job)
+            if step < 3:
                 continue
-            return False
+            return "failed"
         print("[*] Submit clicked; no confirmation text — treating as submitted.")
-        return True
+        return "submitted"
     print("[warn] Ran out of Continue/Submit steps without confirmation.")
-    return False
+    return "failed"
 
 
 def application_roots(page: Page) -> list[Target]:
@@ -1091,7 +1390,40 @@ def fill_candidate_location(page: Target, profile: dict[str, Any]) -> None:
         fill_by_aliases(page, FIELD_ALIASES["location"], location)
 
 
-def upload_resume(page: Target, resume_path: str) -> bool:
+FILE_KIND_TRANSCRIPT = "transcript"
+FILE_KIND_COVER = "cover"
+FILE_KIND_RESUME = "resume"
+FILE_KIND_OTHER = "other"
+_TRANSCRIPT_HINTS = (
+    "transcript",
+    "academic record",
+    "grade report",
+    "academic history",
+    "unofficial grades",
+)
+
+
+def file_field_kind(combined: str) -> str:
+    text = combined.lower()
+    if any(hint in text for hint in _TRANSCRIPT_HINTS):
+        return FILE_KIND_TRANSCRIPT
+    if "cover letter" in text or (
+        "cover" in text and "resume" not in text and not re.search(r"\bcv\b", text)
+    ):
+        return FILE_KIND_COVER
+    if "resume" in text or "curriculum vita" in text or re.search(r"\bcv\b", text):
+        return FILE_KIND_RESUME
+    return FILE_KIND_OTHER
+
+
+def _file_already_set(file_input: Locator) -> bool:
+    try:
+        return bool(file_input.evaluate("el => !!(el.files && el.files.length)"))
+    except Exception:
+        return False
+
+
+def upload_document(page: Target, path: str, *, kind: str, label: str) -> bool:
     file_inputs = page.locator("input[type='file']")
     try:
         count = file_inputs.count()
@@ -1101,41 +1433,170 @@ def upload_resume(page: Target, resume_path: str) -> bool:
     for index in range(count):
         file_input = file_inputs.nth(index)
         try:
-            blob = attr_blob(file_input)
-            label = associated_label_text(page, file_input)
-            combined = f"{blob} {label}"
-            # Prefer resume/CV inputs; skip cover-letter-only pickers.
-            if "cover" in combined and "resume" not in combined and "cv" not in combined:
-                continue
-            try:
-                already = file_input.evaluate("el => !!(el.files && el.files.length)")
-            except Exception:
-                already = False
-            if already:
+            combined = f"{attr_blob(file_input)} {associated_label_text(page, file_input)}"
+            field_kind = file_field_kind(combined)
+            if kind == FILE_KIND_RESUME:
+                if field_kind in {FILE_KIND_TRANSCRIPT, FILE_KIND_COVER}:
+                    continue
+            elif kind == FILE_KIND_TRANSCRIPT:
+                if field_kind != FILE_KIND_TRANSCRIPT:
+                    continue
+            elif kind == FILE_KIND_COVER:
+                if field_kind != FILE_KIND_COVER:
+                    continue
+            if _file_already_set(file_input):
                 return True
-            file_input.set_input_files(resume_path)
-            print(f"  uploaded resume -> {resume_path}")
+            file_input.set_input_files(path)
+            print(f"  uploaded {label} -> {path}")
             time.sleep(1.6)
             return True
         except Exception:
             continue
 
-    # Some Greenhouse boards hide the real file input behind an Attach button.
-    attach = first_visible(
-        page.get_by_role("button", name=re.compile(r"attach|upload|resume|cv", re.I))
-    )
-    if attach:
+    if kind == FILE_KIND_TRANSCRIPT:
+        button_pattern = r"transcript|academic record|grade report"
+    elif kind == FILE_KIND_COVER:
+        button_pattern = r"cover letter|coverletter"
+    else:
+        button_pattern = r"attach|upload|resume|\bcv\b"
+    buttons = page.get_by_role("button", name=re.compile(button_pattern, re.I))
+    try:
+        btn_count = buttons.count()
+    except Exception:
+        btn_count = 0
+    for index in range(btn_count):
+        attach = buttons.nth(index)
         try:
+            if not attach.is_visible():
+                continue
+            parent_text = ""
+            try:
+                parent = attach.locator(
+                    "xpath=ancestor::*[self::div or self::li or self::fieldset][1]"
+                )
+                parent_text = (parent.inner_text() or "")[:240]
+            except Exception:
+                parent_text = ""
+            combined = (
+                f"{attr_blob(attach)} {attach.inner_text() or ''} {parent_text}"
+            )
+            field_kind = file_field_kind(combined)
+            if kind == FILE_KIND_RESUME and field_kind in {
+                FILE_KIND_TRANSCRIPT,
+                FILE_KIND_COVER,
+            }:
+                continue
+            if kind == FILE_KIND_TRANSCRIPT and field_kind != FILE_KIND_TRANSCRIPT:
+                continue
+            if kind == FILE_KIND_COVER and field_kind != FILE_KIND_COVER:
+                continue
             with page.expect_file_chooser(timeout=3_000) as chooser_info:
                 attach.click()
-            chooser_info.value.set_files(resume_path)
-            print("  uploaded resume via file chooser")
+            chooser_info.value.set_files(path)
+            print(f"  uploaded {label} via file chooser")
             time.sleep(1.6)
             return True
         except Exception:
-            pass
+            continue
 
     return False
+
+
+def upload_resume(page: Target, resume_path: str) -> bool:
+    return upload_document(page, resume_path, kind=FILE_KIND_RESUME, label="resume")
+
+
+def upload_transcript(page: Target, transcript_path: str) -> bool:
+    return upload_document(
+        page, transcript_path, kind=FILE_KIND_TRANSCRIPT, label="transcript"
+    )
+
+
+def upload_cover_letter(page: Target, cover_path: str) -> bool:
+    return upload_document(
+        page, cover_path, kind=FILE_KIND_COVER, label="cover letter"
+    )
+
+
+def _looks_like_cover_letter_field(page: Target, control: Locator) -> bool:
+    blob = f"{attr_blob(control)} {associated_label_text(page, control)}"
+    try:
+        parent = control.locator(
+            "xpath=ancestor::*[self::div or self::li or self::fieldset or self::section][1]"
+        )
+        blob = f"{blob} {(parent.inner_text() or '')[:280]}"
+    except Exception:
+        pass
+    lowered = blob.lower()
+    return file_field_kind(lowered) == FILE_KIND_COVER or "cover letter" in lowered
+
+
+def fill_cover_letter(
+    page: Page, profile: dict[str, Any], job: JobPosting | None = None
+) -> None:
+    if not ai_cover_letters_enabled():
+        return
+    roots = application_roots(page)
+    text_controls: list[Locator] = []
+    wants_file = False
+    for root in roots:
+        controls = root.locator("textarea, input[type='text']")
+        try:
+            total = min(controls.count(), 40)
+        except PlaywrightTimeoutError:
+            total = 0
+        for index in range(total):
+            control = controls.nth(index)
+            try:
+                if control.is_visible() and _looks_like_cover_letter_field(root, control):
+                    text_controls.append(control)
+            except Exception:
+                continue
+        file_inputs = root.locator("input[type='file']")
+        try:
+            file_count = file_inputs.count()
+        except PlaywrightTimeoutError:
+            file_count = 0
+        for index in range(file_count):
+            file_input = file_inputs.nth(index)
+            combined = (
+                f"{attr_blob(file_input)} {associated_label_text(root, file_input)}"
+            )
+            if file_field_kind(combined) == FILE_KIND_COVER:
+                wants_file = True
+                break
+        if not wants_file:
+            attach = first_visible(
+                root.get_by_role(
+                    "button", name=re.compile(r"cover letter|coverletter", re.I)
+                )
+            )
+            if attach:
+                wants_file = True
+
+    if not text_controls and not wants_file:
+        print("  no cover letter field found (ok if the form did not ask).")
+        return
+
+    print("[*] Writing cover letter...")
+    letter = generate_cover_letter(profile, job)
+    if not letter:
+        print("  [warn] Cover letter generator returned empty.")
+        return
+    filled = 0
+    for control in text_controls:
+        if fill_if_empty(control, letter):
+            filled += 1
+    if filled:
+        print(f"  filled {filled} cover letter text field(s)")
+    if wants_file:
+        pdf_path = cover_letter_pdf_path(profile, job, letter)
+        if not pdf_path:
+            print("  [warn] Could not write cover letter PDF.")
+            return
+        uploaded = any(upload_cover_letter(root, pdf_path) for root in roots)
+        if not uploaded:
+            print("  [warn] Cover letter file input found but upload failed.")
 
 
 def select_native_option(select: Locator, wanted: tuple[str, ...]) -> bool:
@@ -1192,9 +1653,11 @@ def pick_dropdown_value(page: Target, control: Locator, tokens: tuple[str, ...])
         tag = (control.evaluate("el => el.tagName") or "").lower()
     except Exception:
         tag = ""
+    lowered = tuple(t.lower().strip() for t in tokens)
+    yn_only = set(lowered) <= {"yes", "no", "true", "false"}
     if tag == "select":
-        if "yes" in tokens or "no" in tokens:
-            yn = "yes" if "yes" in tokens else "no"
+        if yn_only:
+            yn = "yes" if ("yes" in lowered or "true" in lowered) else "no"
             if select_yes_no_option(control, yn):
                 return True
         elif select_native_option(control, tokens):
@@ -1206,10 +1669,15 @@ def pick_dropdown_value(page: Target, control: Locator, tokens: tuple[str, ...])
     except Exception:
         return False
     for token in tokens:
-        pattern = re.compile(rf"^{re.escape(token)}$", re.I)
-        option = first_visible(page.get_by_role("option", name=pattern))
+        exact = re.compile(rf"^{re.escape(token)}$", re.I)
+        contains = re.compile(re.escape(token), re.I)
+        option = first_visible(page.get_by_role("option", name=exact))
         if not option:
-            option = first_visible(page.get_by_text(pattern))
+            option = first_visible(page.get_by_role("option", name=contains))
+        if not option:
+            option = first_visible(page.get_by_text(exact))
+        if not option:
+            option = first_visible(page.get_by_text(contains))
         if option and not _looks_like_submit(option) and _click_locator(option):
             return True
     return False
@@ -1284,6 +1752,8 @@ def answer_yes_no_question(page: Target, question_aliases: tuple[str, ...], answ
             if not select.is_visible():
                 continue
             context = _question_text_for_control(page, select)
+            if _skip_generic_yesno(context):
+                continue
             if looks_like(context, question_aliases) and select_yes_no_option(select, yn):
                 answered += 1
         except Exception:
@@ -1300,6 +1770,8 @@ def answer_yes_no_question(page: Target, question_aliases: tuple[str, ...], answ
             if not combo.is_visible():
                 continue
             context = _question_text_for_control(page, combo)
+            if _skip_generic_yesno(context):
+                continue
             if not looks_like(context, question_aliases):
                 continue
             if pick_dropdown_value(page, combo, (yn,)):
@@ -1326,7 +1798,9 @@ def answer_yes_no_question(page: Target, question_aliases: tuple[str, ...], answ
             text = " ".join((group.inner_text() or "").split()).lower()
         except Exception:
             continue
-        if len(text) < 12 or len(text) > 900:
+        if len(text) < 12 or len(text) > 1800:
+            continue
+        if _skip_generic_yesno(text):
             continue
         if not looks_like(text, question_aliases):
             continue
@@ -1341,6 +1815,99 @@ def answer_yes_no_question(page: Target, question_aliases: tuple[str, ...], answ
             group.locator("select, [role='combobox'], button, [class*='select']")
         )
         if dropdown and pick_dropdown_value(page, dropdown, (yn,)):
+            answered += 1
+
+    return answered
+
+
+def _wanted_is_yes_no(wanted: tuple[str, ...]) -> str | None:
+    lowered = {t.lower().strip() for t in wanted}
+    if lowered <= {"yes", "true"}:
+        return "yes"
+    if lowered <= {"no", "false"}:
+        return "no"
+    return None
+
+
+def answer_choice_question(
+    page: Target, question_aliases: tuple[str, ...], wanted: tuple[str, ...]
+) -> int:
+    """Answer a labeled question by matching option/radio/select text."""
+    if not question_aliases or not wanted:
+        return 0
+    yn = _wanted_is_yes_no(wanted)
+    if yn:
+        return answer_yes_no_question(page, question_aliases, yn)
+
+    answered = 0
+    selects = page.locator("select")
+    try:
+        select_count = min(selects.count(), 80)
+    except PlaywrightTimeoutError:
+        select_count = 0
+    for index in range(select_count):
+        select = selects.nth(index)
+        try:
+            if not select.is_visible():
+                continue
+            context = _question_text_for_control(page, select)
+            if looks_like(context, question_aliases) and select_native_option(select, wanted):
+                answered += 1
+        except Exception:
+            continue
+
+    combos = page.locator("[role='combobox'], button:has-text('Select')")
+    try:
+        combo_count = min(combos.count(), 40)
+    except Exception:
+        combo_count = 0
+    for index in range(combo_count):
+        combo = combos.nth(index)
+        try:
+            if not combo.is_visible():
+                continue
+            context = _question_text_for_control(page, combo)
+            if not looks_like(context, question_aliases):
+                continue
+            if pick_dropdown_value(page, combo, wanted):
+                answered += 1
+        except Exception:
+            continue
+
+    groups = page.locator(
+        "fieldset, [role='group'], .application-question, .question, "
+        ".select__control, [data-testid*='question'], .field, .form-group, "
+        ".application-field, li.question, [class*='application-form-field']"
+    )
+    try:
+        group_count = min(groups.count(), 250)
+    except PlaywrightTimeoutError:
+        group_count = 0
+
+    seen: set[str] = set()
+    for index in range(group_count):
+        group = groups.nth(index)
+        try:
+            if not group.is_visible():
+                continue
+            text = " ".join((group.inner_text() or "").split()).lower()
+        except Exception:
+            continue
+        if len(text) < 8 or len(text) > 1800:
+            continue
+        if not looks_like(text, question_aliases):
+            continue
+        fingerprint = text[:160]
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        if click_matching_choice(group, wanted):
+            answered += 1
+            continue
+        dropdown = first_visible(
+            group.locator("select, [role='combobox'], button, [class*='select']")
+        )
+        if dropdown and pick_dropdown_value(page, dropdown, wanted):
             answered += 1
 
     return answered
@@ -1708,6 +2275,8 @@ def fill_common_identity(page: Target, profile: dict[str, Any]) -> None:
 
     fill_candidate_location(page, profile)
     fill_country_plus_one(page, profile)
+    pronouns = usable_profile_value(profile.get("pronouns", "")) or "she/her"
+    fill_by_aliases(page, FIELD_ALIASES["pronouns"], pronouns)
 
 
 def fill_education(page: Target, profile: dict[str, Any]) -> None:
@@ -1758,6 +2327,10 @@ def fill_structured_facts(
     fill_by_aliases(page, FIELD_ALIASES["current_employer"], employer)
     start = usable_profile_value(profile.get("graduation_date", "")) or "December 2026"
     fill_by_aliases(page, FIELD_ALIASES["start_date"], start)
+    years = str(profile.get("years_of_experience") or "1")
+    fill_by_aliases(page, FIELD_ALIASES["years_of_experience"], years)
+    salary = str((profile.get("preferences") or {}).get("preferred_salary") or "150000")
+    fill_by_aliases(page, FIELD_ALIASES["salary"], salary)
 
     age_hits = answer_yes_no_question(page, AGE_18_YES_LABELS, "yes")
     if age_hits:
@@ -2092,7 +2665,7 @@ def fill_essay_answers(page: Target, profile: dict[str, Any], job: JobPosting | 
         return
 
     filled_ids: set[str] = set()
-    controls = page.locator("textarea, input[type='text']")
+    controls = page.locator("textarea, input[type='text'], input[type='number']")
     try:
         total = min(controls.count(), 80)
     except PlaywrightTimeoutError:
@@ -2162,8 +2735,32 @@ def fill_essay_answers(page: Target, profile: dict[str, Any], job: JobPosting | 
                 print(f"  checked '{item.get('id')}'")
                 break
 
+    fill_choice_bank(page)
+
     if filled_ids:
         print(f"  essay bank filled {len(filled_ids)} question(s): {', '.join(sorted(filled_ids))}")
+
+
+def fill_choice_bank(page: Target) -> int:
+    """Fill common select/radio questions from answers.json (skips EEO; those use fill_self_identify)."""
+    bank = load_json(ANSWERS_PATH, {})
+    items = list(bank.get("choices") or [])
+    answered = 0
+    for item in items:
+        qid = str(item.get("id") or "")
+        if qid in EEO_CHOICE_IDS:
+            continue
+        phrases = tuple(str(p).lower() for p in (item.get("any") or []) if p)
+        choose = tuple(str(c).lower() for c in (item.get("choose") or ["yes"]))
+        if not phrases or not choose:
+            continue
+        hits = answer_choice_question(page, phrases, choose)
+        if hits:
+            answered += hits
+            print(f"  answered common question '{qid}'")
+    if answered:
+        print(f"  common-question bank filled {answered} choice(s).")
+    return answered
 
 
 def fill_application(page: Page, profile: dict[str, Any], job: JobPosting | None = None) -> None:
@@ -2177,6 +2774,20 @@ def fill_application(page: Page, profile: dict[str, Any], job: JobPosting | None
     uploaded = any(upload_resume(root, profile["_resume_abs"]) for root in roots)
     if not uploaded:
         print("  [warn] No resume file input found — upload it manually.")
+
+    transcript_path = str(profile.get("_transcript_abs") or "")
+    if profile.get("_transcript_exists") and transcript_path:
+        print("[*] Uploading transcript if the form asks...")
+        transcript_uploaded = any(
+            upload_transcript(root, transcript_path) for root in roots
+        )
+        if not transcript_uploaded:
+            print("  no transcript file input found (ok if the form did not ask).")
+    elif profile.get("transcript_path"):
+        print("  [warn] Transcript path is set but the PDF was not found — skip upload.")
+
+    print("[*] Cover letter (if the form asks)...")
+    fill_cover_letter(page, profile, job)
 
     print("[*] Filling education fields (best effort)...")
     for root in roots:
@@ -2205,6 +2816,9 @@ def fill_application(page: Page, profile: dict[str, Any], job: JobPosting | None
     print("[*] Filling essay / custom questions from answers.json...")
     for root in roots:
         fill_essay_answers(root, profile, job)
+
+    print("[*] Filling self-identification / EEO...")
+    fill_self_identify(page)
 
     if uploaded:
         print("[*] Waiting for resume parse — not touching filled fields again.")
@@ -2235,8 +2849,205 @@ def warn_if_walled_garden(ats: str) -> None:
     if ats in {"linkedin", "indeed", "workday"}:
         print(
             f"[warn] {ats} often requires a login or extra widgets. "
-            "Fill what you can, then complete the rest during the review pause."
+            "This listing may be skipped if it is not a public Greenhouse/Lever/Ashby form."
         )
+
+
+def _control_maxlength(control: Locator) -> int:
+    try:
+        raw = control.get_attribute("maxlength")
+        return int(raw) if raw else 0
+    except Exception:
+        return 0
+
+
+def _native_select_options(select: Locator) -> list[str]:
+    labels: list[str] = []
+    try:
+        options = select.locator("option")
+        total = min(options.count(), 40)
+    except Exception:
+        return labels
+    for index in range(total):
+        try:
+            text = " ".join((options.nth(index).inner_text() or "").split())
+        except Exception:
+            continue
+        lowered = text.lower()
+        if not text or lowered in {"select", "select...", "please select", "choose", "-"}:
+            continue
+        labels.append(text)
+    return labels
+
+
+def _select_looks_empty(select: Locator) -> bool:
+    try:
+        value = (select.input_value() or "").strip()
+    except Exception:
+        value = ""
+    try:
+        label = select.evaluate(
+            "el => (el.options && el.selectedIndex >= 0) ? (el.options[el.selectedIndex].text || '') : ''"
+        )
+        lowered = " ".join(str(label or "").split()).lower()
+    except Exception:
+        lowered = ""
+    if lowered in {"", "select", "select...", "please select", "choose", "-"}:
+        return True
+    return not value
+
+
+def collect_unanswered_fields(page: Page) -> list[dict[str, Any]]:
+    """Visible empty text/select fields the answer bank did not cover."""
+    found: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for root in application_roots(page):
+        controls = root.locator(
+            "textarea, input[type='text'], input[type='number'], "
+            "input:not([type]), select"
+        )
+        try:
+            total = min(controls.count(), 80)
+        except Exception:
+            total = 0
+        for index in range(total):
+            if len(found) >= 20:
+                return found
+            control = controls.nth(index)
+            try:
+                if not control.is_visible():
+                    continue
+                type_attr = (control.get_attribute("type") or "").lower()
+                tag = (control.evaluate("el => el.tagName") or "").lower()
+            except Exception:
+                continue
+            if type_attr in {"hidden", "file", "submit", "button", "checkbox", "radio", "password"}:
+                continue
+            question = " ".join(_question_text_for_control(root, control).split())
+            if len(question) < 8:
+                continue
+            lowered = question.lower()
+            if any(bit in lowered for bit in AI_SKIP_FIELD_BITS):
+                continue
+            kind = "select" if tag == "select" else ("textarea" if tag == "textarea" else "text")
+            options: list[str] = []
+            if kind == "select":
+                if not _select_looks_empty(control):
+                    continue
+                options = _native_select_options(control)
+            else:
+                try:
+                    if (control.input_value(timeout=800) or "").strip():
+                        continue
+                except Exception:
+                    continue
+            fingerprint = f"{kind}:{lowered[:160]}"
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            found.append(
+                {
+                    "id": f"q{len(found)+1}",
+                    "kind": kind,
+                    "question": question[:900],
+                    "options": options,
+                    "maxlength": _control_maxlength(control),
+                    "locator": control,
+                    "root": root,
+                }
+            )
+    return found
+
+
+def _apply_ai_field(field: dict[str, Any], answer: dict[str, str]) -> bool:
+    control: Locator = field["locator"]
+    root: Target = field["root"]
+    kind = str(field.get("kind") or "text")
+    choice = (answer.get("choice") or "").strip()
+    text = (answer.get("text") or "").strip()
+    maxlength = int(field.get("maxlength") or 0)
+    if maxlength and text and len(text) > maxlength:
+        text = text[:maxlength]
+    wanted = tuple(token.lower() for token in (choice, text) if token)
+    if kind == "select" and wanted:
+        if set(wanted) <= {"yes", "no", "true", "false"}:
+            yn = "yes" if any(token in {"yes", "true"} for token in wanted) else "no"
+            if select_yes_no_option(control, yn):
+                return True
+        if select_native_option(control, wanted):
+            return True
+        if pick_dropdown_value(root, control, wanted):
+            return True
+    if text and fill_if_empty(control, text):
+        return True
+    if choice:
+        try:
+            parent = control.locator(
+                "xpath=ancestor::*[self::div or self::li or self::fieldset or self::section][1]"
+            )
+            if parent.count() and click_matching_choice(parent, (choice.lower(),)):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def fill_remaining_with_ai(
+    page: Page, profile: dict[str, Any], job: JobPosting | None = None
+) -> int:
+    if not ai_answers_enabled():
+        return 0
+    fields = collect_unanswered_fields(page)
+    if not fields:
+        return 0
+    print(f"[*] Asking AI to write {len(fields)} leftover answer(s)...")
+    payload = [
+        {
+            "id": field["id"],
+            "kind": field["kind"],
+            "question": field["question"],
+            "options": field["options"],
+            "maxlength": field["maxlength"],
+        }
+        for field in fields
+    ]
+    answers = answer_questions(payload, profile, job)
+    filled = 0
+    for field in fields:
+        answer = answers.get(field["id"]) or {}
+        if not (answer.get("text") or answer.get("choice")):
+            continue
+        try:
+            if _apply_ai_field(field, answer):
+                filled += 1
+                preview = (answer.get("choice") or answer.get("text") or "")[:48]
+                print(f"  AI filled {field['id']}: {preview}")
+        except Exception:
+            continue
+    if filled:
+        print(f"  AI filled {filled} leftover field(s).")
+    return filled
+
+
+def fill_all_form_pages(
+    page: Page, profile: dict[str, Any], job: JobPosting | None = None
+) -> None:
+    """Fill visible fields from the profile, answer bank, then AI. Never Submit."""
+    dismiss_cookie_banners(page)
+    fill_application(page, profile, job)
+    fill_self_identify(page)
+    check_consent_boxes(page)
+    answer_hear_about(page)
+    fill_remaining_with_ai(page, profile, job)
+    if not form_fields_present(page):
+        print("[warn] Could not find application fields.")
+        return
+    invalid = visible_invalid_fields(page)
+    if invalid:
+        preview = "; ".join(invalid[:6])
+        print(f"[*] Remaining blank/invalid fields: {preview}")
+        fill_remaining_with_ai(page, profile, job)
+    print("[*] Fill pass finished.")
 
 
 def _form_page_key(page: Page) -> str:
@@ -2268,25 +3079,6 @@ def _browser_alive(page: Page) -> bool:
         return False
 
 
-def fill_all_form_pages(
-    page: Page, profile: dict[str, Any], job: JobPosting | None = None
-) -> None:
-    """Fill visible fields once, then stop. Never Submit; never press Enter in inputs."""
-    dismiss_cookie_banners(page)
-    fill_application(page, profile, job)
-    decline_self_identify(page)
-    check_consent_boxes(page)
-    answer_hear_about(page)
-    if not form_fields_present(page):
-        print("[warn] Could not find application fields. Leaving the page open for you.")
-        return
-    invalid = visible_invalid_fields(page)
-    if invalid:
-        preview = "; ".join(invalid[:6])
-        print(f"[*] Remaining blank/invalid fields (yours to edit): {preview}")
-    print("[*] Fill pass finished. Waiting — will not Submit or clear the form.")
-
-
 # ---------------------------------------------------------------------------
 # Safety pause
 # ---------------------------------------------------------------------------
@@ -2295,20 +3087,25 @@ def wait_for_human_finish(
     page: Page,
     profile: dict[str, Any],
     job: JobPosting | None = None,
+    *,
+    reason: str = "",
 ) -> str:
-    """
-    Keep Chromium open on this one application until the human is done.
-    Does not fill again, does not click Submit, and does not open the next role.
-    """
+    """Pause only when a human must act (CAPTCHA). Next app waits."""
     company = job.company if job else "this listing"
     title = job.title if job else ""
     url = job.best_url() if job else (page.url or "")
     job_id = job.id if job else ""
+    captcha = reason == "captcha"
+    heading = (
+        "CAPTCHA — SOLVE IT IN CHROMIUM, THEN CLICK SUBMIT."
+        if captcha
+        else "FORM IS OPEN — EDIT ANYTHING YOU WANT. NEXT APP WAITS."
+    )
     banner = "\n".join(
         [
             "",
             "=" * 72,
-            "FORM IS OPEN — EDIT ANYTHING YOU WANT. NEXT APP WAITS.",
+            heading,
             "=" * 72,
             f"  Company : {company}",
             f"  Role    : {title or '—'}",
@@ -2316,15 +3113,14 @@ def wait_for_human_finish(
             "",
             "The next application will NOT open until this one is finished.",
             "In the Chromium window:",
-            "  1. Check every auto-filled value (name, email, phone, links, resume).",
-            "  2. Fill anything still blank. Change any answer that looks wrong.",
-            "  3. Click Continue yourself if another page of questions appears — the bot will wait.",
-            "  4. Click Submit yourself when it looks right. The bot will not click Submit.",
+            "  1. Complete the CAPTCHA / bot check." if captcha else "  1. Check auto-filled values.",
+            "  2. Click Submit yourself. The bot will not click Submit on a CAPTCHA page."
+            if captcha
+            else "  2. Click Submit yourself when it looks right.",
             "",
-            "When you are done, either:",
-            "  • Wait — only a real confirmation page (form gone) counts as submitted",
-            "  • Click a button in the Application Queue dashboard",
-            "  • Press Enter in this terminal (if you launched the bot yourself)",
+            "When you are done:",
+            "  • Wait until a thank-you page appears (Sheets updates automatically)",
+            "  • Or click **I submitted** in the Application Queue dashboard",
             "=" * 72,
             "",
         ]
@@ -2336,8 +3132,17 @@ def wait_for_human_finish(
             fill_status=STATUS_REVIEWING,
             prepped_at=utc_now(),
             sheet_error="",
+            notes="CAPTCHA — waiting for you to submit" if captcha else job.notes,
         )
-    write_review_signal(job_id, "waiting", action="", company=company, title=title, url=url)
+    write_review_signal(
+        job_id,
+        "waiting",
+        action="",
+        company=company,
+        title=title,
+        url=url,
+        reason=reason,
+    )
     write_bot_lock(job_id)
 
     try:
@@ -2349,12 +3154,25 @@ def wait_for_human_finish(
 
     def _stdin_wait() -> None:
         try:
-            input(">>> Press Enter when you have submitted or are done editing this form... ")
+            if not sys.stdin or not sys.stdin.isatty():
+                return
+            line = sys.stdin.readline()
+            if line == "":
+                return
             terminal_done["hit"] = True
-        except (EOFError, KeyboardInterrupt):
-            terminal_done["hit"] = True
+        except (EOFError, KeyboardInterrupt, OSError):
+            return
 
-    if sys.stdin.isatty():
+    try:
+        stdin_interactive = bool(sys.stdin) and sys.stdin.isatty()
+    except Exception:
+        stdin_interactive = False
+    if stdin_interactive:
+        print(
+            ">>> Press Enter to leave this as ready for review "
+            "(does not mark submitted). Use the dashboard to mark submitted.",
+            flush=True,
+        )
         threading.Thread(target=_stdin_wait, daemon=True).start()
 
     last_url = ""
@@ -2371,14 +3189,20 @@ def wait_for_human_finish(
             bot_notify("[*] Thank-you page detected — treating this as submitted.")
             time.sleep(1.5)
             if job is not None:
-                _sync_after_approval(job)
+                _sync_after_approval(
+                    job,
+                    notes="Submitted after CAPTCHA" if captcha else "Submitted",
+                )
             return STATUS_APPLIED
 
         signal = load_review_signal()
         action = str(signal.get("action") or "").strip().lower()
         if action in {"submitted", "applied"}:
             if job is not None:
-                _sync_after_approval(job)
+                _sync_after_approval(
+                    job,
+                    notes="Submitted after CAPTCHA" if captcha else "Submitted",
+                )
             return STATUS_APPLIED
         if action == "skip":
             bot_notify(f"[*] Skipped {company} — {title or 'listing'} from the dashboard.")
@@ -2392,7 +3216,10 @@ def wait_for_human_finish(
         if terminal_done["hit"]:
             if submission_looks_successful(page):
                 if job is not None:
-                    _sync_after_approval(job)
+                    _sync_after_approval(
+                        job,
+                        notes="Submitted after CAPTCHA" if captcha else "Submitted",
+                    )
                 return STATUS_APPLIED
             bot_notify(
                 f"[*] Left {company} — {title or 'listing'} in the queue as ready for review."
@@ -2413,15 +3240,22 @@ def wait_for_human_finish(
         time.sleep(0.8)
 
 
-def _sync_after_approval(job: JobPosting) -> None:
-    """Called only after the human confirms they submitted the form."""
+def _sync_after_approval(job: JobPosting, notes: str = "") -> None:
+    """Mark applied and append a Google Sheets tracker row."""
+    if notes:
+        job.notes = notes
     job.fill_status = "applied"
     job.applied_at = utc_now()
-    update_match_status(job.id, fill_status="applied", applied_at=job.applied_at)
+    update_match_status(
+        job.id,
+        fill_status="applied",
+        applied_at=job.applied_at,
+        notes=job.notes,
+    )
     try:
         from tracker_sync import append_application
 
-        append_application(job)
+        append_application(job, notes=job.notes)
         print("[*] Google Sheets tracker updated.")
     except Exception as exc:
         print(f"[warn] Could not sync Google Sheets: {exc}")
@@ -2472,29 +3306,47 @@ def run(
         open_application_form(page)
 
         warn_if_walled_garden(ats)
-        print(f"[*] Filling {ats} application (then waiting — will not Submit)...")
+        print(f"[*] Filling {ats} application...")
         fill_all_form_pages(page, profile, job)
 
-        if auto_submit_enabled():
+        if captcha_present(page):
             bot_notify(
-                f"[*] Submitting {job.company if job else 'listing'} — "
-                f"{job.title if job else ''}."
+                f"[*] CAPTCHA on {job.company if job else 'listing'} — "
+                "solve it and click Submit. Everything else stays automatic."
             )
-            submitted = submit_filled_application(page, profile, job)
-            if submitted:
+            status = wait_for_human_finish(page, profile, job, reason="captcha")
+        elif auto_submit_enabled():
+            bot_notify(
+                f"[*] Auto-submitting {job.company if job else 'listing'} — "
+                f"{job.title if job else ''} (no CAPTCHA)."
+            )
+            outcome = submit_filled_application(page, profile, job)
+            if outcome == "captcha":
+                bot_notify("[*] CAPTCHA appeared during submit. Waiting for you.")
+                status = wait_for_human_finish(page, profile, job, reason="captcha")
+            elif outcome == "submitted":
                 if job is not None:
-                    _sync_after_approval(job)
-                return STATUS_APPLIED
-            bot_notify(
-                "[warn] Auto-submit did not confirm. Leaving the form open so you can finish it."
-            )
-
-        if job is not None:
-            bot_notify(
-                f"[*] Form prepped for {job.company} — {job.title}. "
-                "Window stays open. Edit anything, then Submit. Next role waits."
-            )
-        status = wait_for_human_finish(page, profile, job)
+                    _sync_after_approval(job, notes="Auto-submitted")
+                status = STATUS_APPLIED
+            else:
+                bot_notify(
+                    "[warn] Auto-submit failed and there is no CAPTCHA. "
+                    "Marking failed and moving to the next role."
+                )
+                if job is not None:
+                    update_match_status(
+                        job.id,
+                        fill_status=STATUS_FAILED,
+                        notes="Auto-submit could not confirm (no CAPTCHA).",
+                    )
+                status = STATUS_FAILED
+        else:
+            if job is not None:
+                bot_notify(
+                    f"[*] Form prepped for {job.company} — {job.title}. "
+                    "AUTO_SUBMIT is off, so this window stays open."
+                )
+            status = wait_for_human_finish(page, profile, job)
     finally:
         try:
             browser.close()
@@ -2645,9 +3497,8 @@ def run_auto_prep(
     include_pending: bool = False,
 ) -> None:
     """
-    Drain the automatic prep queue one listing at a time. The next form does
-    not open until the current Chromium window is finished (submitted, skipped,
-    or closed).
+    Drain the automatic apply queue one listing at a time. Submits without
+    waiting unless a CAPTCHA is on the page.
     """
     write_bot_lock()
     processed = 0
@@ -2677,8 +3528,8 @@ def run_auto_prep(
             job = jobs[0]
             _announce_job(job, processed + 1, processed + 1)
             bot_notify(
-                f"[*] Opening one application: {job.company} — {job.title}. "
-                "The next role waits until you finish this form."
+                f"[*] Opening {job.company} — {job.title}. "
+                "Will auto-submit unless a CAPTCHA appears."
             )
             _prep_one(playwright, profile, job, release_lock=False)
             processed += 1
@@ -2691,7 +3542,7 @@ def run_auto_prep(
             "[bot] Auto-prep queue is empty. New $150k+ matches are queued automatically after a scrape."
         )
     bot_notify(
-        f"[*] Session complete. {processed} application(s) opened one at a time."
+        f"[*] Session complete. {processed} application(s) processed."
     )
 
 
@@ -2709,6 +3560,11 @@ def main() -> None:
         bot_notify(
             "[warn] profile.json phone is missing. Auto-submit will still run; "
             "forms that require a phone number will fail."
+        )
+    if auto_submit_enabled() and not ai_answers_enabled():
+        bot_notify(
+            "[warn] No LLM API key in .env. Leftover essays use answers.json only. "
+            "Set OPENAI_API_KEY (or ANTHROPIC_API_KEY / GEMINI_API_KEY) for AI answers."
         )
 
     with sync_playwright() as playwright:

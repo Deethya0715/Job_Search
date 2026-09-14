@@ -97,14 +97,147 @@
       "answer": "Getting SignalSafe to detect a turn intent from phone sensors without a car CAN bus. GPS lag and noisy IMU data made naive thresholds fire all the time. I combined spatial map-matching with accelerometer/gyro windows so the nudge only fires when motion and road geometry agree. That’s the core of provisional patent 64/132,977, and it taught me to treat sensor fusion as a product constraint, not a lab demo."
     },
     {
+      "id": "hear_about_other_specify",
+      "any": [
+        "if other, please specify",
+        "if other please specify",
+        "please specify other",
+        "other (please specify)",
+        "please specify how you heard",
+        "if other, specify"
+      ],
+      "answer": "Google job search"
+    },
+    {
       "id": "additional_info",
       "any": [
         "anything else",
         "additional information",
-        "other information you'd like",
-        "cover letter"
+        "other information you'd like"
       ],
       "answer": "UT Dallas CS, graduating December 2026. U.S. citizen, no sponsorship. Summer 2026 intern at CBRE (Dallas). I file and build: U.S. Provisional Patent 64/132,977 (SignalSafe), Salesforce AI certs, and production ServiceNow/TypeScript/Python work. GitHub: github.com/Deethya0715."
+    },
+    {
+      "id": "about_yourself",
+      "any": [
+        "tell us about yourself",
+        "introduce yourself",
+        "brief introduction",
+        "short bio",
+        "describe yourself"
+      ],
+      "answer": "I’m Deethya Janjanam, a UT Dallas CS new grad (December 2026) and U.S. citizen. I build production software: a Nuxt/Prisma EHR for a clinic (Hope. Cope. Heal.), SignalSafe (phone-sensor turn-intent, U.S. Provisional Patent 64/132,977), and ServiceNow/GenAI platform work as a Software Engineering Intern at CBRE. I want a full-stack / product SWE role writing Python and TypeScript that people actually use."
+    },
+    {
+      "id": "salary_expectation",
+      "any": [
+        "salary expectation",
+        "compensation expectation",
+        "expected salary",
+        "desired salary",
+        "pay expectation",
+        "expected compensation",
+        "desired compensation",
+        "salary requirements",
+        "compensation requirements"
+      ],
+      "answer": "150000"
+    },
+    {
+      "id": "years_experience",
+      "any": [
+        "years of experience",
+        "years of professional",
+        "how many years",
+        "years of relevant",
+        "total years of experience"
+      ],
+      "answer": "1"
+    },
+    {
+      "id": "availability",
+      "any": [
+        "when can you start",
+        "earliest start date",
+        "date you can start",
+        "available to start",
+        "start date",
+        "notice period"
+      ],
+      "answer": "December 2026, after graduation. Available full-time from December 2026."
+    },
+    {
+      "id": "work_auth_text",
+      "any": [
+        "work authorization status",
+        "visa status",
+        "citizenship status",
+        "describe your work authorization"
+      ],
+      "answer": "U.S. Citizen — authorized to work in the United States; no visa sponsorship required."
+    },
+    {
+      "id": "teamwork",
+      "any": [
+        "worked on a team",
+        "teamwork",
+        "collaborate with others",
+        "working with others"
+      ],
+      "answer": "At CBRE I sat with legal-ops users, mapped their intake into ServiceNow routing, and wrote Knowledge Base guides so L1.5 could actually diagnose issues. In EPICS I shipped a multi-role EHR with clinicians — product decisions were made with the people who click the software, not in a vacuum."
+    },
+    {
+      "id": "leadership",
+      "any": [
+        "leadership experience",
+        "led a team",
+        "leadership example",
+        "times you led"
+      ],
+      "answer": "I owned SignalSafe end-to-end: problem, sensor fusion, on-device prototype, and U.S. Provisional Patent 64/132,977. I also drove EPICS clinic intake from messy paper to a Nuxt/Prisma app with real roles. I lead by shipping a working system and the tests/docs behind it, then pulling others onto a clear path."
+    },
+    {
+      "id": "why_hire",
+      "any": [
+        "why should we hire you",
+        "why you for this",
+        "what would you bring",
+        "unique value"
+      ],
+      "answer": "I already ship production-shaped work as a new grad: CBRE platform/GenAI, a clinic EHR, and a patented sensor product. I write Python and TypeScript, own APIs and data paths, and I am a U.S. citizen with no sponsorship. I want {title} at {company} because that is the same loop at a larger scale."
+    },
+    {
+      "id": "five_years",
+      "any": [
+        "five years",
+        "5 years",
+        "where do you see yourself",
+        "career goals"
+      ],
+      "answer": "I want to be a strong product / full-stack engineer who owns a system end to end — APIs, data, reliability — and can still sit with the people who use it. Five years out I want deep expertise in production Python/TypeScript platforms, not a management-only track."
+    },
+    {
+      "id": "favorite_project",
+      "any": [
+        "favorite project",
+        "proudest project",
+        "project you are most proud",
+        "tell us about a project"
+      ],
+      "answer": "SignalSafe. Missed turn signals cause a lot of near-misses I see around Dallas. I used phone accelerometer, gyro, and GPS to detect turn intent and nudge the driver — no car API. GPS lag and noisy IMU data broke naive thresholds; map-matching plus motion windows fixed it. That work is U.S. Provisional Patent 64/132,977."
+    },
+    {
+      "id": "transcript_note",
+      "any": [
+        "unofficial transcript",
+        "official transcript",
+        "provide a transcript",
+        "copy of your transcript",
+        "academic transcript",
+        "college transcript",
+        "university transcript"
+      ],
+      "answer": "Yes. Unofficial UT Dallas transcript through Semester 5 is attached. An official registrar copy is available on request."
     }
   ],
   "checkboxes": [
@@ -116,6 +249,345 @@
         "different applications",
         "fdse and swe roles have different"
       ],
+      "choose": ["yes"]
+    }
+  ],
+  "choices": [
+    {
+      "id": "gender",
+      "any": ["gender identity", "gender", "sex"],
+      "choose": ["female", "woman"]
+    },
+    {
+      "id": "pronouns",
+      "any": ["pronouns", "preferred pronouns"],
+      "choose": ["she/her", "she / her", "she, her"]
+    },
+    {
+      "id": "veteran",
+      "any": [
+        "veteran status",
+        "protected veteran",
+        "veteran",
+        "military status",
+        "served in the military"
+      ],
+      "choose": [
+        "i am not a protected veteran",
+        "i am not a veteran",
+        "not a protected veteran",
+        "no, i am not a veteran",
+        "i have never served"
+      ]
+    },
+    {
+      "id": "disability",
+      "any": [
+        "disability status",
+        "voluntary self-identification of disability",
+        "have a disability",
+        "ofccp",
+        "section 503"
+      ],
+      "choose": [
+        "yes, i have a disability, or have a history",
+        "yes, i have a disability, or have had",
+        "yes, i have a disability (or previously",
+        "yes, i have a disability",
+        "i have a disability, or have had",
+        "i have a disability (or previously"
+      ]
+    },
+    {
+      "id": "race",
+      "any": ["race/ethnicity", "race or ethnicity", "racial identity", "ethnicity"],
+      "choose": [
+        "decline to self-identify",
+        "decline to self identify",
+        "i don't wish to answer",
+        "i do not wish to answer",
+        "prefer not to say",
+        "prefer not to answer"
+      ]
+    },
+    {
+      "id": "hispanic",
+      "any": ["hispanic", "latino", "latina", "latinx"],
+      "choose": [
+        "decline to self-identify",
+        "decline to self identify",
+        "i don't wish to answer",
+        "i do not wish to answer",
+        "prefer not to say",
+        "prefer not to answer"
+      ]
+    },
+    {
+      "id": "relocate",
+      "any": [
+        "willing to relocate",
+        "open to relocation",
+        "able to relocate",
+        "relocate for this",
+        "relocation"
+      ],
+      "choose": ["yes"]
+    },
+    {
+      "id": "remote",
+      "any": [
+        "open to remote",
+        "remote work",
+        "hybrid work",
+        "work from home",
+        "on-site or remote"
+      ],
+      "choose": ["yes", "remote", "hybrid", "no preference", "flexible"]
+    },
+    {
+      "id": "background_check",
+      "any": [
+        "background check",
+        "criminal background",
+        "background screening"
+      ],
+      "choose": ["yes"]
+    },
+    {
+      "id": "drug_test",
+      "any": ["drug test", "drug screening", "drug screen"],
+      "choose": ["yes"]
+    },
+    {
+      "id": "student",
+      "any": [
+        "currently a student",
+        "currently enrolled",
+        "are you a student",
+        "enrolled in a degree"
+      ],
+      "choose": ["yes"]
+    },
+    {
+      "id": "transcript",
+      "any": [
+        "unofficial transcript",
+        "official transcript",
+        "provide a transcript",
+        "upload a transcript",
+        "upload your transcript",
+        "academic transcript",
+        "copy of your transcript",
+        "college transcript",
+        "university transcript"
+      ],
+      "choose": ["yes"]
+    },
+    {
+      "id": "currently_employed",
+      "any": [
+        "currently employed",
+        "are you employed",
+        "current employment"
+      ],
+      "choose": ["no"]
+    },
+    {
+      "id": "previously_applied",
+      "any": [
+        "previously applied",
+        "applied to a position",
+        "applied before",
+        "have you applied",
+        "have you ever applied",
+        "history with",
+        "prior application",
+        "applied to this company",
+        "applied to this organization",
+        "submitted an application before",
+        "applied for a position"
+      ],
+      "choose": ["no", "false"]
+    },
+    {
+      "id": "previously_employed_or_acquired",
+      "any": [
+        "or any company that",
+        "has acquired",
+        "companies acquired",
+        "acquired by this company"
+      ],
+      "choose": ["no", "false"]
+    },
+    {
+      "id": "conflict_of_interest",
+      "any": [
+        "conflict of interest",
+        "worked for the us government",
+        "worked for the u.s. government",
+        "worked for the united states government",
+        "congressional staffer",
+        "member of the military, state, or federal",
+        "oversight over",
+        "in the last 5 years, worked for the us government",
+        "in the last 5 years, worked for the u.s. government"
+      ],
+      "choose": ["no", "false"]
+    },
+    {
+      "id": "clearance_level_held",
+      "any": [
+        "what clearance level",
+        "clearance level have you held",
+        "held a u.s. security clearance in the past",
+        "held a us security clearance in the past",
+        "if you have held a u.s. security clearance",
+        "if you have held a us security clearance",
+        "past clearance level",
+        "previously held clearance",
+        "highest clearance",
+        "clearance you have held"
+      ],
+      "choose": [
+        "n/a - have never held u.s. security clearance",
+        "n/a - have never held us security clearance",
+        "have never held u.s. security clearance",
+        "have never held us security clearance",
+        "never held",
+        "not applicable",
+        "n/a",
+        "none"
+      ]
+    },
+    {
+      "id": "clearance_eligible",
+      "any": [
+        "clearance eligibility",
+        "eligible to obtain and maintain",
+        "obtain and maintain a u.s. security clearance",
+        "obtain and maintain a us security clearance",
+        "presently hold an active u.s. security clearance",
+        "presently hold an active us security clearance",
+        "this position requires eligibility to obtain",
+        "requires eligibility to obtain and maintain",
+        "eligible for a u.s. security clearance",
+        "eligible for a us security clearance"
+      ],
+      "choose": [
+        "yes, i am eligible for a u.s. security clearance",
+        "yes, i am eligible for a us security clearance",
+        "yes, i am eligible",
+        "eligible for a u.s. security clearance",
+        "eligible to obtain",
+        "i am eligible"
+      ]
+    },
+    {
+      "id": "security_clearance",
+      "any": [
+        "do you have a security clearance",
+        "do you currently hold a security clearance",
+        "active security clearance",
+        "hold a security clearance",
+        "possess a security clearance"
+      ],
+      "choose": [
+        "no",
+        "i do not currently hold",
+        "do not currently hold",
+        "no, i do not have"
+      ]
+    },
+    {
+      "id": "export_controls",
+      "any": [
+        "export controls",
+        "export control",
+        "protected individual",
+        "protected individual(s)",
+        "immigration and naturalization act",
+        "8 u.s.c. 1324b",
+        "8 usc 1324b",
+        "1324b(a)(3)",
+        "subject to u.s. export controls",
+        "subject to us export controls",
+        "itar",
+        "u.s. person",
+        "us person"
+      ],
+      "choose": [
+        "a united states citizen or national",
+        "united states citizen or national",
+        "u.s. citizen or national",
+        "us citizen or national",
+        "united states citizen",
+        "u.s. person",
+        "us person",
+        "yes"
+      ]
+    },
+    {
+      "id": "sponsorship",
+      "any": [
+        "require sponsorship",
+        "will you require sponsorship",
+        "visa sponsorship",
+        "need sponsorship",
+        "require a visa",
+        "h-1b",
+        "h1b",
+        "now or will you in the future",
+        "now, or will you in the future",
+        "immigration sponsorship",
+        "sponsor you",
+        "sponsorship from",
+        "work visa",
+        "require visa sponsorship"
+      ],
+      "choose": ["no", "false"]
+    },
+    {
+      "id": "work_authorization",
+      "any": [
+        "u.s. work authorization",
+        "us work authorization",
+        "authorized to work in the united states",
+        "legally authorized to work",
+        "are you authorized to work",
+        "authorized to work in the u.s"
+      ],
+      "choose": ["yes", "true"]
+    },
+    {
+      "id": "hear_about",
+      "any": [
+        "how did you hear",
+        "how did you find",
+        "how you heard",
+        "how did you learn about",
+        "where did you hear",
+        "referral source",
+        "source of hire",
+        "how did you hear about us"
+      ],
+      "choose": [
+        "google job search",
+        "google",
+        "indeed",
+        "linkedin",
+        "handshake",
+        "company website",
+        "career site",
+        "job board",
+        "simplify",
+        "university",
+        "internet",
+        "other"
+      ]
+    },
+    {
+      "id": "willing_to_travel",
+      "any": ["willing to travel", "able to travel", "travel required"],
       "choose": ["yes"]
     }
   ]
